@@ -1,0 +1,2 @@
+import 'reflect-metadata'; import { DataSource } from 'typeorm'; import { entities } from './entities';
+export default new DataSource({type:'mssql',host:process.env.DB_HOST??'mssql',port:Number(process.env.DB_PORT??1433),username:process.env.DB_USERNAME??'sa',password:process.env.DB_PASSWORD,database:process.env.DB_DATABASE??'sccvi-db',options:{encrypt:(process.env.DB_ENCRYPT??'no')==='yes',trustServerCertificate:(process.env.DB_TRUST_SERVER_CERTIFICATE??'true')==='true'},entities:[...entities],migrations:[`${__dirname}/migrations/*.{js,ts}`],synchronize:false});
