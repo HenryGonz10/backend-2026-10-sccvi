@@ -127,6 +127,8 @@ export class SccviService {
     });
   }
   async getMenor(id: string, principal: SccviPrincipal) { const item = await this.minor(id); await this.assertAccess(id, principal); return item; }
+  /** Resolves the clinical record directly from its SSO identity, even before a read projection catches up. */
+  async existingMenorByPersona(personaId: string, principal: SccviPrincipal) { const item = await this.menores.findOneBy({ persona_id: personaId, estado: true }); if (!item) return null; await this.assertAccess(item.id, principal); return item; }
   async listMenores(page: MenorQueryDto, principal: SccviPrincipal) {
     const filters = { estado: true, ...(page.persona_id ? { persona_id: page.persona_id } : {}), ...(page.departamento_codigo ? { departamento_codigo: page.departamento_codigo } : {}), ...(page.municipio_codigo ? { municipio_codigo: page.municipio_codigo } : {}) };
     if (this.isStaff(principal)) return this.page(this.menores, page, { ...filters, ...(await this.territoryFor(principal)) });

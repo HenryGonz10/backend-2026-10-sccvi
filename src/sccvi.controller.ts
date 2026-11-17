@@ -24,6 +24,7 @@ export class SccviController {
   @Get('busquedas/menores') async searchMinors(@Query() q: ReadProjectionQueryDto, @Req() r: { principal: SccviPrincipal }) { const principal = this.p(r); reader(principal); return this.readProjection.search({ ...q, ...(await this.service.territoryFor(principal)) }); }
   @Post('lecturas/reconstruir') rebuildReads(@Req() r: { principal: SccviPrincipal }) { admin(this.p(r)); return this.readProjection.rebuild(); }
   @Get('menores') menores(@Query() q: MenorQueryDto, @Req() r: { principal: SccviPrincipal }) { return this.service.listMenores(q, this.p(r)); }
+  @Get('menores/persona/:personaId') existingMenor(@Param('personaId') personaId: string, @Req() r: { principal: SccviPrincipal }) { return this.service.existingMenorByPersona(personaId, this.p(r)); }
   @Post('menores') createMenor(@Body() b: MenorDto, @Req() r: { principal: SccviPrincipal }) { clinician(this.p(r)); return this.service.createMenor(b, this.p(r)); }
   @Post('familias') createFamily(@Body() b: FamiliaRegistroDto, @Req() r: { principal: SccviPrincipal }) { clinician(this.p(r)); return this.service.createFamily(b, this.p(r)); }
   @Get('menores/:id') menor(@Param('id') id: string, @Req() r: { principal: SccviPrincipal }) { return this.service.getMenor(id, this.p(r)); }
