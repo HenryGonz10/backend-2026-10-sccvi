@@ -38,8 +38,8 @@ export class SccviService {
   }
   private async audit(principal: SccviPrincipal, accion: string, recurso: string, recursoId?: string, detalle?: object) { await this.auditoria.insert({ accion, recurso, recurso_id: recursoId ?? null, actor_persona_id: principal.personaId ?? null, detalle: detalle ? JSON.stringify(detalle) : null }); }
   private async minor(id: string) { const item = await this.menores.findOneBy({ id }); if (!item) throw new NotFoundException('Menor no encontrado.'); return item; }
-  private isStaff(principal: SccviPrincipal) { return ['sccvi.read', 'sccvi.clinical', 'sccvi.admin', 'sso.admin', 'SCCVI_ADMIN', 'SCCVI_DDRISS', 'SCCVI_ESTABLECIMIENTO', 'SCCVI_CONSULTA', 'Administrador'].some(scope => principal.scopes.includes(scope) || principal.roles.includes(scope)); }
-  private isGlobalAdmin(principal: SccviPrincipal) { return ['sccvi.admin', 'sso.admin', 'SCCVI_ADMIN', 'Administrador'].some(role => principal.scopes.includes(role) || principal.roles.includes(role)) || (principal.permissions ?? []).includes('CATALOGOS.ADMINISTRAR'); }
+  private isStaff(principal: SccviPrincipal) { return ['sccvi.read', 'sccvi.clinical', 'sccvi.admin', 'SCCVI_ADMIN', 'SCCVI_DDRISS', 'SCCVI_ESTABLECIMIENTO', 'SCCVI_CONSULTA'].some(scope => principal.scopes.includes(scope) || principal.roles.includes(scope)); }
+  private isGlobalAdmin(principal: SccviPrincipal) { return ['sccvi.admin', 'SCCVI_ADMIN'].some(role => principal.scopes.includes(role) || principal.roles.includes(role)) || (principal.permissions ?? []).includes('CATALOGOS.ADMINISTRAR'); }
   /** Staff lists use the worker base location; global clinical search remains available for travelers. */
   async territoryFor(principal: SccviPrincipal): Promise<{ departamento_codigo?: string; municipio_codigo?: string }> {
     if (this.isGlobalAdmin(principal)) return {};

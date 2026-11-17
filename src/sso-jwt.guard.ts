@@ -52,7 +52,6 @@ export const requireScope = (principal: SccviPrincipal, ...allowed: string[]): v
     'sccvi.admin': ['SCCVI_ADMIN'],
     'sccvi.clinical': ['SCCVI_ADMIN', 'SCCVI_DDRISS', 'SCCVI_ESTABLECIMIENTO'],
     'sccvi.read': ['SCCVI_ADMIN', 'SCCVI_DDRISS', 'SCCVI_ESTABLECIMIENTO', 'SCCVI_CONSULTA'],
-    'sso.admin': ['Administrador'],
   };
   const permissionAliases: Record<string, string[]> = { 'sccvi.admin': ['CATALOGOS.ADMINISTRAR'], 'sccvi.clinical': ['PACIENTES.CREAR', 'PACIENTES.EDITAR', 'CRECIMIENTO.CREAR', 'VACUNACION.CREAR', 'JORNADAS.CREAR'], 'sccvi.read': ['PERSONAS.VER', 'PACIENTES.VER', 'REPORTES.VER'] };
   const permissions = principal.permissions ?? [];
