@@ -67,7 +67,7 @@ export class SccviReadProjectionService implements OnModuleInit, OnModuleDestroy
       this.vaccinations.find({ where: { menor_id: minorId }, order: { fecha_aplicacion: 'DESC' } }),
       this.measurements.find({ where: { menor_id: minorId }, order: { fecha: 'DESC' } }),
       this.alerts.find({ where: { menor_id: minorId }, order: { fecha_programada: 'ASC' } }),
-      this.sso.resolvePeople([minor.persona_id], await this.serviceTokens.get()).catch(() => []),
+      this.projectionPeople([minor.persona_id]),
     ]);
     const doseIds = [...new Set([...applications.map(item => item.esquema_dosis_id), ...alerts.map(item => item.esquema_dosis_id)])];
     const doseRows = doseIds.length ? await this.doses.findBy({ id: In(doseIds) }) : [];
@@ -103,6 +103,12 @@ export class SccviReadProjectionService implements OnModuleInit, OnModuleDestroy
     const ids = response.hits.hits.map(hit => String(hit._id)); const docs = await this.collection!.find({ _id: { $in: ids } }).toArray(); const byId = new Map(docs.map(doc => [doc._id, doc])); const items = ids.map(id => byId.get(id)).filter((value): value is MinorReadDocument => Boolean(value));
     const total = response.hits.total && typeof response.hits.total === 'object' ? response.hits.total.value : ids.length;
     return { items, meta: { current_page, per_page: size, total, last_page: Math.max(1, Math.ceil(total / size)) } };
+  }
+
+  /** A missing technical credential must not prevent SQL clinical records from reaching the read model. */
+  private async projectionPeople(personaIds: string[]) {
+    try { return await this.sso.resolvePeople(personaIds, await this.serviceTokens.get()); }
+    catch { return []; }
   }
 
   private async connect(): Promise<boolean> {

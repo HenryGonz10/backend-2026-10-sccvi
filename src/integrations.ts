@@ -5,6 +5,7 @@ type Envelope<T> = { valid: boolean; data: T; msg: string; meta?: { current_page
 const endpoint = (base: string, path: string) => new URL(path, base.endsWith('/') ? base : `${base}/`);
 const authorization = (token: string) => token.startsWith('Bearer ') ? token : `Bearer ${token}`;
 export type SsoPerson = { persona_id: string; cui?: string; ncompleto: string; fecha_nacimiento?: string; sexo?: string; direccion_ref?: string | null; departamento_codigo?: string | null; municipio_codigo?: string | null; comunidad_ref?: string | null; contactos?: Array<{ canal: string; destino: string; estado: boolean }> };
+export type SsoCredential = string | { cookie: string };
 
 @Injectable()
 export class SsoClient {
@@ -27,20 +28,20 @@ export class SsoClient {
       return payload;
     } catch (error) { if (error instanceof BadGatewayException) throw error; throw new ServiceUnavailableException('SSO is temporarily unavailable.'); } finally { clearTimeout(timer); }
   }
-  private contextHeaders(token: string) { return { Authorization: authorization(token), System: this.config.get<string>('SSO_SYSTEM_TAG', 'sccvi') }; }
-  resolvePeople(ids: string[], token: string) { return this.request<SsoPerson[]>('personas/resolver', { method: 'POST', headers: { ...this.contextHeaders(token), 'Content-Type': 'application/json' }, body: JSON.stringify({ persona_ids: ids }) }); }
-  createPerson(input: Record<string, unknown>, token: string, idempotencyKey: string) { return this.request<SsoPerson>('personas', { method: 'POST', headers: { ...this.contextHeaders(token), 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey }, body: JSON.stringify(input) }); }
-  search(query: { cui?: string; q?: string; fecha_nacimiento?: string; page?: number; per_page?: number }, token: string) { const params = new URLSearchParams(Object.entries(query).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)])); return this.request<SsoPerson[]>(`personas?${params}`, { headers: this.contextHeaders(token) }); }
-  async residents(scope: { departamento_codigo?: string | null; municipio_codigo?: string | null; comunidad_ref?: string | null }, token: string): Promise<SsoPerson[]> {
+  private contextHeaders(credential: SsoCredential) { return { ...(typeof credential === 'string' ? { Authorization: authorization(credential) } : { Cookie: credential.cookie }), System: this.config.get<string>('SSO_SYSTEM_TAG', 'sccvi') }; }
+  resolvePeople(ids: string[], credential: SsoCredential) { return this.request<SsoPerson[]>('personas/resolver', { method: 'POST', headers: { ...this.contextHeaders(credential), 'Content-Type': 'application/json' }, body: JSON.stringify({ persona_ids: ids }) }); }
+  createPerson(input: Record<string, unknown>, credential: SsoCredential, idempotencyKey: string) { return this.request<SsoPerson>('personas', { method: 'POST', headers: { ...this.contextHeaders(credential), 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey }, body: JSON.stringify(input) }); }
+  search(query: { cui?: string; q?: string; fecha_nacimiento?: string; page?: number; per_page?: number }, credential: SsoCredential) { const params = new URLSearchParams(Object.entries(query).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)])); return this.request<SsoPerson[]>(`personas?${params}`, { headers: this.contextHeaders(credential) }); }
+  async residents(scope: { departamento_codigo?: string | null; municipio_codigo?: string | null; comunidad_ref?: string | null }, credential: SsoCredential): Promise<SsoPerson[]> {
     const result: SsoPerson[] = []; let page = 1; let lastPage = 1;
     do {
       const params = new URLSearchParams(Object.entries({ ...scope, page, per_page: 100 }).filter(([, value]) => value !== undefined && value !== null).map(([key, value]) => [key, String(value)]));
-      const response = await this.requestPage<SsoPerson[]>(`personas?${params}`, { headers: this.contextHeaders(token) });
+      const response = await this.requestPage<SsoPerson[]>(`personas?${params}`, { headers: this.contextHeaders(credential) });
       result.push(...response.data); lastPage = Math.max(1, Number(response.meta?.last_page ?? 1)); page += 1;
     } while (page <= lastPage);
     return result;
   }
-  contacts(personaId: string, token: string) { return this.request<Array<{ canal: string; destino: string; estado: boolean }>>(`personas/${personaId}/contactos`, { headers: this.contextHeaders(token) }); }
+  contacts(personaId: string, credential: SsoCredential) { return this.request<Array<{ canal: string; destino: string; estado: boolean }>>(`personas/${personaId}/contactos`, { headers: this.contextHeaders(credential) }); }
 }
 
 @Injectable()

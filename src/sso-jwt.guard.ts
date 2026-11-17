@@ -4,7 +4,7 @@ import { Reflector } from '@nestjs/core';
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import { IS_PUBLIC } from './public.decorator';
 
-export type SccviPrincipal = { userId: string; personaId?: string; scopes: string[]; roles: string[]; permissions?: string[]; territory?: { departamento_codigo?: string; municipio_codigo?: string }; payload: JWTPayload };
+export type SccviPrincipal = { userId: string; personaId?: string; scopes: string[]; roles: string[]; permissions?: string[]; territory?: { departamento_codigo?: string; municipio_codigo?: string }; /** Forwarded only to the configured SSO API for this request. */ ssoSessionCookie?: string; payload: JWTPayload };
 
 @Injectable()
 export class SsoJwtGuard implements CanActivate {
@@ -31,7 +31,7 @@ export class SsoJwtGuard implements CanActivate {
     const response = await fetch(new URL('auth/session/me', base.endsWith('/') ? base : `${base}/`), { headers: { Accept: 'application/json', Cookie: cookie, System: this.config.get<string>('SSO_SYSTEM_TAG', 'sccvi') } });
     const body = await response.json().catch(() => null) as { valid?: boolean; data?: { id?: string | number; persona_id?: string | number; roles?: unknown; authorization_context?: unknown } } | null; const data = body?.data;
     if (!response.ok || !body?.valid || !data || !/^\d+$/.test(String(data.id ?? ''))) throw new Error('Invalid SSO portal session.');
-    const persona = String(data.persona_id ?? ''); return { userId: String(data.id), personaId: /^\d+$/.test(persona) ? persona : undefined, scopes: [], roles: this.roleNames(data.roles), permissions: this.permissionNames(data.roles), territory: this.territoryFromContext(data.authorization_context), payload: { sub: String(data.id) } as JWTPayload };
+    const persona = String(data.persona_id ?? ''); return { userId: String(data.id), personaId: /^\d+$/.test(persona) ? persona : undefined, scopes: [], roles: this.roleNames(data.roles), permissions: this.permissionNames(data.roles), territory: this.territoryFromContext(data.authorization_context), ssoSessionCookie: cookie, payload: { sub: String(data.id) } as JWTPayload };
   }
 
   private async rolesFromContext(token: string): Promise<string[]> {

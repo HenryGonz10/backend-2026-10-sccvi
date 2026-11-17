@@ -6,9 +6,9 @@ import { SccviService } from './sccvi.service';
 import { requireScope, SccviPrincipal } from './sso-jwt.guard';
 import { Public } from './public.decorator';
 
-const admin = (p: SccviPrincipal) => requireScope(p, 'sccvi.admin', 'sso.admin');
-const clinician = (p: SccviPrincipal) => requireScope(p, 'sccvi.clinical', 'sccvi.admin', 'sso.admin');
-const reader = (p: SccviPrincipal) => requireScope(p, 'sccvi.read', 'sccvi.clinical', 'sccvi.admin', 'sso.admin');
+const admin = (p: SccviPrincipal) => requireScope(p, 'sccvi.admin');
+const clinician = (p: SccviPrincipal) => requireScope(p, 'sccvi.clinical', 'sccvi.admin');
+const reader = (p: SccviPrincipal) => requireScope(p, 'sccvi.read', 'sccvi.clinical', 'sccvi.admin');
 
 @ApiTags('SCCVI') @ApiBearerAuth() @Controller('api/v1')
 export class SccviController {
@@ -17,7 +17,7 @@ export class SccviController {
 
   @Public() @Get('health') health() { return { status: 'ok' }; }
   @Get('sesion') session(@Req() r: { principal: SccviPrincipal }) { const p = this.p(r); return { user_id: p.userId, persona_id: p.personaId ?? null, scopes: p.scopes, roles: p.roles, permissions: p.permissions }; }
-  @Get('personas/buscar') searchPeople(@Query() q: PersonaSearchDto, @Req() r: { principal: SccviPrincipal }) { reader(this.p(r)); return this.service.searchPeople(q); }
+  @Get('personas/buscar') searchPeople(@Query() q: PersonaSearchDto, @Req() r: { principal: SccviPrincipal }) { const principal = this.p(r); reader(principal); return this.service.searchPeople(q, principal); }
   @Get('personas/:personaId/menores') dependents(@Param('personaId') personaId: string, @Req() r: { principal: SccviPrincipal }) { return this.service.dependentsForPerson(personaId, this.p(r)); }
   @Get('personas/:personaId') person(@Param('personaId') personaId: string, @Req() r: { principal: SccviPrincipal }) { return this.service.getPerson(personaId, this.p(r)); }
   @Get('lecturas/menores') async readMinors(@Query() q: ReadProjectionQueryDto, @Req() r: { principal: SccviPrincipal }) { const principal = this.p(r); reader(principal); return this.readProjection.list({ ...q, ...(await this.service.territoryFor(principal)) }); }

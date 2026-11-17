@@ -6,7 +6,7 @@ import * as argon2 from 'argon2';
 import { In, ObjectLiteral, Repository } from 'typeorm';
 import { AlertaVacunacion, AuditoriaSccvi, CarnePublico, EsquemaDosis, EsquemaVacunacion, JornadaVacunacion, JornadaVacuna, MedicionAntropometrica, Menor, MenorResponsable, RegistroVacunacion, Vacuna } from './entities';
 import { AplicacionDto, DosisDto, EsquemaDto, FamiliaRegistroDto, FamiliaResponsableDto, JornadaDto, MedicionDto, MenorDto, MenorQueryDto, PageDto, PersonaSearchDto, ResponsableDto, UpdateEsquemaDto, UpdateJornadaDto, UpdateMenorDto, UpdateResponsableDto, UpdateVacunaDto, VacunaDto } from './dto';
-import { GeoClient, SsoClient } from './integrations';
+import { GeoClient, SsoClient, type SsoCredential } from './integrations';
 import { OutboxService } from './outbox.service';
 import { SccviReadProjectionService } from './read-projection.service';
 import { ProjectionOutboxService } from './projection-outbox.service';
@@ -47,7 +47,7 @@ export class SccviService {
     // Departamento is a two-character code. An account that has not yet been
     // assigned must remain closed-scope without producing an invalid SQL value.
     if (!principal.personaId) return { departamento_codigo: '00' };
-    const person = (await this.sso.resolvePeople([principal.personaId], await this.serviceToken()))[0];
+    const person = (await this.sso.resolvePeople([principal.personaId], await this.ssoCredential(principal)))[0];
     if (!person?.departamento_codigo) return { departamento_codigo: '00' };
     if (principal.roles.includes('SCCVI_ESTABLECIMIENTO') && person.municipio_codigo) return { departamento_codigo: person.departamento_codigo, municipio_codigo: person.municipio_codigo };
     return { departamento_codigo: person.departamento_codigo };
@@ -75,12 +75,14 @@ export class SccviService {
     const ids = [...new Set(matches.map(item => item.id))];
     return ids.length ? ids : [dose.id];
   }
-  private async requirePerson(personaId: string) { const people = await this.sso.resolvePeople([personaId], await this.serviceToken()); if (people.length !== 1 || people[0].persona_id !== personaId) throw new UnprocessableEntityException('La persona indicada no existe o no está activa en SSO.'); return people[0]; }
+  /** Prefer the authenticated SSO session for request-bound directory access. */
+  private async ssoCredential(principal?: SccviPrincipal): Promise<SsoCredential> { return principal?.ssoSessionCookie ? { cookie: principal.ssoSessionCookie } : this.serviceToken(); }
+  private async requirePerson(personaId: string, principal?: SccviPrincipal) { const people = await this.sso.resolvePeople([personaId], await this.ssoCredential(principal)); if (people.length !== 1 || people[0].persona_id !== personaId) throw new UnprocessableEntityException('La persona indicada no existe o no está activa en SSO.'); return people[0]; }
 
   /** Projection failures never roll back authoritative clinical writes. */
   private projectLater(menorId: string) { void this.projectionOutbox.enqueue(menorId).catch(() => undefined); }
 
-  async searchPeople(query: PersonaSearchDto) { return this.sso.search(query, await this.serviceToken()); }
+  async searchPeople(query: PersonaSearchDto, principal?: SccviPrincipal) { return this.sso.search(query, await this.ssoCredential(principal)); }
   async getPerson(personaId: string, principal: SccviPrincipal) {
     const ownProfile = principal.personaId === personaId;
     let relatedChild = false;
@@ -89,10 +91,10 @@ export class SccviService {
       relatedChild = Boolean(minor && await this.responsables.exist({ where: { menor_id: minor.id, persona_id: principal.personaId, estado: true } }));
     }
     if (!this.isStaff(principal) && !ownProfile && !relatedChild) throw new NotFoundException('Persona no encontrada.');
-    const token = await this.serviceToken(); const people = await this.sso.resolvePeople([personaId], token);
+    const credential = await this.ssoCredential(principal); const people = await this.sso.resolvePeople([personaId], credential);
     if (people.length !== 1 || people[0].persona_id !== personaId) throw new NotFoundException('Persona no encontrada en SSO.');
     if (relatedChild) return people[0];
-    const contactos = await this.sso.contacts(personaId, token).catch(() => []);
+    const contactos = await this.sso.contacts(personaId, credential).catch(() => []);
     return { ...people[0], contactos: contactos.filter(contacto => contacto.estado) };
   }
   /** Reverse family view for a responsible adult. Citizen accounts can only read their own links. */
@@ -106,7 +108,7 @@ export class SccviService {
     const minors = await this.menores.find({ where: { id: In(ids), estado: true }, order: { id: 'ASC' } });
     if (!minors.length) return [];
     const [people, applications, measurements] = await Promise.all([
-      this.sso.resolvePeople(minors.map(item => item.persona_id), await this.serviceToken()),
+      this.sso.resolvePeople(minors.map(item => item.persona_id), await this.ssoCredential(principal)),
       this.registros.find({ where: { menor_id: In(minors.map(item => item.id)), estado: 'VALIDA' }, order: { fecha_aplicacion: 'DESC' } }),
       this.mediciones.find({ where: { menor_id: In(minors.map(item => item.id)) }, order: { fecha: 'DESC' } }),
     ]);
@@ -136,7 +138,7 @@ export class SccviService {
   }
   async createMenor(input: MenorDto, principal: SccviPrincipal) {
     await this.validateLocation(input);
-    await this.requirePerson(input.persona_id);
+    await this.requirePerson(input.persona_id, principal);
     try { const item = await this.menores.save(this.menores.create({ ...input, fecha_ingreso: new Date().toISOString().slice(0, 10), pais_codigo: 'GT', estado: true, direccion_ref: input.direccion_ref ?? null, comunidad_ref: input.comunidad_ref ?? null, departamento_codigo: input.departamento_codigo ?? null, municipio_codigo: input.municipio_codigo ?? null, observaciones: input.observaciones ?? null, created_by_persona_id: principal.personaId ?? null, updated_by_persona_id: principal.personaId ?? null })); await this.audit(principal, 'CREATE', 'menor', item.id); this.projectLater(item.id); return item; } catch (error) { if (error instanceof BadGatewayException || error instanceof ServiceUnavailableException) throw error; throw new ConflictException('Ya existe un menor para esa persona SSO.'); }
   }
   /**
@@ -182,7 +184,7 @@ export class SccviService {
     }
     return this.createResponsable(menorId, { persona_id: person.persona_id, tipo_relacion: input.tipo_relacion, fecha_inicio: new Date().toISOString().slice(0, 10) }, principal);
   }
-  async createResponsable(menorId: string, input: ResponsableDto, principal: SccviPrincipal) { await this.minor(menorId); await this.requirePerson(input.persona_id); try { const item = await this.responsables.save(this.responsables.create({ ...input, menor_id: menorId, fecha_fin: input.fecha_fin ?? null, estado: input.estado ?? true, created_by_persona_id: principal.personaId ?? null, updated_by_persona_id: principal.personaId ?? null })); await this.audit(principal, 'CREATE', 'menor_responsable', item.id); this.projectLater(menorId); return item; } catch (error) { if (error instanceof UnprocessableEntityException || error instanceof ServiceUnavailableException) throw error; throw new ConflictException('La relación responsable-menor ya existe.'); } }
+  async createResponsable(menorId: string, input: ResponsableDto, principal: SccviPrincipal) { await this.minor(menorId); await this.requirePerson(input.persona_id, principal); try { const item = await this.responsables.save(this.responsables.create({ ...input, menor_id: menorId, fecha_fin: input.fecha_fin ?? null, estado: input.estado ?? true, created_by_persona_id: principal.personaId ?? null, updated_by_persona_id: principal.personaId ?? null })); await this.audit(principal, 'CREATE', 'menor_responsable', item.id); this.projectLater(menorId); return item; } catch (error) { if (error instanceof UnprocessableEntityException || error instanceof ServiceUnavailableException) throw error; throw new ConflictException('La relación responsable-menor ya existe.'); } }
   async updateResponsable(menorId: string, id: string, input: UpdateResponsableDto, principal: SccviPrincipal) { if (!await this.responsables.exist({ where: { id, menor_id: menorId } })) throw new NotFoundException('Relación no encontrada.'); const { version, ...values } = input; const saved = await this.patch(this.responsables, id, version, { ...values, updated_by_persona_id: principal.personaId ?? null }); await this.audit(principal, 'UPDATE', 'menor_responsable', id); this.projectLater(menorId); return saved; }
   async deleteResponsable(menorId: string, id: string, version: number, principal: SccviPrincipal) { if (!await this.responsables.exist({ where: { id, menor_id: menorId } })) throw new NotFoundException('Relación no encontrada.'); await this.patch(this.responsables, id, version, { estado: false, fecha_fin: new Date().toISOString().slice(0, 10), updated_by_persona_id: principal.personaId ?? null }); await this.audit(principal, 'DELETE', 'menor_responsable', id); this.projectLater(menorId); return null; }
 
