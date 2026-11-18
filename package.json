@@ -10,6 +10,7 @@
     "migration:run": "typeorm migration:run -d dist/data-source.js",
     "seed:demo": "node dist/scripts/seed-demo.js",
     "seed:growth-standards": "node dist/scripts/seed-growth-standards.js",
+    "verify:growth-sources": "node dist/scripts/verify-who-source.js",
     "test": "jest --runInBand --config jest.config.cjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint \"src/**/*.ts\""
