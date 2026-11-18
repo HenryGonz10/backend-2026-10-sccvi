@@ -10,7 +10,7 @@ Para lecturas rápidas, `SccviReadProjectionService` reconstruye todos los docum
 
 ## Base y datos
 
-Las migraciones crean: menores, responsables, vacunas, esquemas/dosis, jornadas, aplicaciones, mediciones, alertas, outbox de notificaciones, outbox Rabbit de proyecciones y auditoría. `persona_id` y todos los identificadores BIGINT se tratan como cadenas en la API. El carné se construye desde `esquema_dosis` y `registros_vacunacion`; las mediciones quedan en su tabla independiente. El seed idempotente carga el catálogo pediátrico de referencia, cinco menores y encargados ficticios solo después del seed local de SSO.
+Las migraciones crean: menores, responsables, vacunas, esquemas/dosis, jornadas, aplicaciones, mediciones, estándar/parámetros/evaluaciones OMS, alertas clínicas, outbox de notificaciones, outbox Rabbit de proyecciones y auditoría. `persona_id` y todos los identificadores BIGINT se tratan como cadenas en la API. El carné se construye desde `esquema_dosis` y `registros_vacunacion`; las mediciones quedan en su tabla independiente. Antes de recibir controles clínicos ejecute `npm run seed:growth-standards`, que carga de forma idempotente los LMS OMS versionados. El seed de vacunación es únicamente DEMO y carga personas ficticias sólo después del seed local de SSO.
 
 ## Ejecución aislada
 
@@ -36,7 +36,7 @@ Para contenedores: `docker compose --env-file ..\.env.infrastructure up --build`
 
 ## Endpoints
 
-Todos los endpoints `/api/v1` usan `{ valid, data, msg }`. Están disponibles los endpoints solicitados para menores/responsables, vacunas, esquemas/dosis, vacunación, mediciones, jornadas, alertas, campañas geográficas (`POST /jornadas/:id/notificar`) y reportes. Swagger: `/api/documentation`.
+Todos los endpoints `/api/v1` usan `{ valid, data, msg }`. Están disponibles los endpoints solicitados para menores/responsables, vacunas, esquemas/dosis, vacunación, mediciones y sus correcciones, jornadas, alertas de vacunación y de crecimiento, campañas geográficas (`POST /jornadas/:id/notificar`) y reportes. Swagger: `/api/documentation`. Los diagramas de contexto y secuencia están en `docs/sccvi-architecture.puml` y `docs/sccvi-sequences.puml`; la matriz de evidencia y bloqueos está en `docs/MATRIZ_CIERRE_SCCVI.md`.
 
 Las rutas, permisos y reglas de concurrencia se detallan en [API.md](API.md); la instalación, migración, seed y variables de operación en [OPERATIONS.md](OPERATIONS.md).
 
@@ -44,7 +44,7 @@ Las rutas, permisos y reglas de concurrencia se detallan en [API.md](API.md); la
 
 La búsqueda protegida acepta nombre normalizado, prefijo o CUI completo y fecha `YYYY-MM-DD`; combina vacuna, estado, alertas y rango de última aplicación. Las consultas se mantienen dentro del territorio del perfil clínico; el administrador global no recibe ese recorte. El ciudadano no usa el índice clínico: obtiene solamente sus menores mediante una relación responsable activa y cualquier menor ajeno responde 404.
 
-El QR crea un enlace opaco, revocable y con vencimiento. SCCVI guarda un selector, un verificador del enlace y un verificador de PIN con Argon2id y sales aleatorias; no guarda ninguno de los secretos recuperables. El PIN de seis dígitos se muestra una sola vez y debe entregarse por un canal distinto al QR. Cinco intentos fallidos bloquean el carné durante 15 minutos. Después de verificar el PIN se muestran el nombre, las vacunas y el último control de crecimiento; nunca CUI, dirección, responsables, contactos ni notas. Una nueva emisión revoca el QR anterior.
+El QR crea un enlace opaco, revocable y con vencimiento. SCCVI guarda un selector, un verificador del enlace y un verificador de PIN con Argon2id y sales aleatorias; no guarda ninguno de los secretos recuperables. El PIN de seis dígitos se muestra una sola vez y debe entregarse por un canal distinto al QR. Cinco intentos fallidos bloquean el carné durante 15 minutos. Además, las rutas públicas admiten como máximo diez intentos por minuto para cada combinación de IP y token, antes de ejecutar Argon2; el exceso devuelve el envelope `429 RATE_LIMITED`. Después de verificar el PIN se muestran el nombre, las vacunas y el último control de crecimiento; nunca CUI, dirección, responsables, contactos ni notas. Una nueva emisión revoca el QR anterior.
 
 ## Operación
 

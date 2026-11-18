@@ -1,31 +1,21 @@
-# Catálogo de vacunación de demostración
+# Catálogo de vacunación DEMO
 
-El seed `npm run seed:demo` instala el esquema **PAI-GT-REGULAR-2021**. Es un
-catálogo versionado para pruebas locales, no una sustitución de una norma vigente
-ni una fuente de prescripción clínica.
+`npm run seed:demo` instala `PAI-GT-DEMO-2026`: datos exclusivamente ficticios
+para demostrar altas, reglas de secuencia, historial y reportes. No es un PAI
+vigente, una norma MSPAS ni una fuente de prescripción clínica.
 
-## Alcance contrastado
+El código histórico `PAI-GT-REGULAR-2021` se conserva solo para que las
+aplicaciones ya registradas puedan seguir leyéndose. El seed lo deja inactivo y
+con vigencia final `2025-12-31`; no se selecciona como catálogo actual.
 
-La secuencia pediátrica se contrastó con el carné de referencia proporcionado:
+## Regla de actualización
 
-- BCG y hepatitis B al nacimiento.
-- Pentavalente y fIPV a los 2 y 4 meses; pentavalente a los 6 meses.
-- bOPV a los 6 y 18 meses, y a los 5 años.
-- Rotavirus a los 2 y 4 meses; neumococo a los 2, 4 y 12 meses.
-- SRP a los 12 y 18 meses; DPT a los 18 meses y 5 años.
-- Influenza a los 6 y 7 meses, seguida por la dosis anual recurrente.
+No se debe activar ningún esquema real hasta contar con la fuente aprobada por
+el programa de inmunizaciones del MSPAS, su versión, vigencias, dosis, edades,
+intervalos y checksum. Esa actualización debe crear un código nuevo, conservar
+las aplicaciones históricas y documentar la aprobación; no se deben editar las
+definiciones usadas por registros clínicos existentes.
 
-La tercera dosis de influenza usa `intervalo_repeticion_dias=365`. Las
-aplicaciones clínicas llevan `secuencia`, por lo que una aplicación anual no
-sobrescribe las anteriores. Peso y talla viven exclusivamente en
-`sccvi_mediciones_antropometricas` y no requieren una vacuna.
-
-## Actualización normativa
-
-Al sustituir el esquema, cree un nuevo código y fecha de vigencia; no edite las
-dosis ya usadas por historiales clínicos. La búsqueda oficial realizada el 31 de
-octubre de 2026 localizó lineamientos MSPAS para COVID-19 y las *Normas de
-atención en salud integral para primero y segundo nivel* (publicadas el 27 de
-febrero de 2025), pero no una tabla pública más reciente del PAI regular que
-reemplace de forma verificable esta referencia 2021. La aprobación y la fuente
-normativa del nuevo PAI deben venir del programa de inmunizaciones del MSPAS.
+La dosis recurrente demostrativa conserva `secuencia`, de modo que una nueva
+aplicación nunca sobrescribe una anterior. Esto prueba el comportamiento del
+sistema, no la validez clínica del calendario.

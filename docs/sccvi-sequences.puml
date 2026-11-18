@@ -1,0 +1,69 @@
+@startuml SCCVI_sequences
+hide footbox
+
+title Alta familiar sin transacción distribuida
+actor Clinico
+participant "SPA SCCVI" as SPA
+participant "API SCCVI" as API
+participant SSO
+database "SQL SCCVI" as DB
+Clinico -> SPA : ingresa menor, responsables y contactos
+SPA -> SSO : crea/reutiliza persona por CUI y contactos
+SSO --> SPA : persona_id y versión
+SPA -> API : POST /familias con persona_id
+API -> DB : crea menor y relaciones tipadas
+API --> SPA : resultado de cada etapa
+note over SPA,DB
+No hay transacción distribuida. El reintento usa CUI/idempotencia;
+si SCCVI falla después de SSO, se conserva la persona sin vínculo y
+la interfaz informa el resultado parcial para reintentar sin duplicar.
+end note
+
+newpage QR con PIN
+actor Verificador
+participant "API SCCVI" as QR
+database "SQL SCCVI" as Cards
+Verificador -> QR : GET /public/carnes/{token}
+QR -> Cards : verifica selector, vigencia y revocación
+QR --> Verificador : requiere PIN (sin datos clínicos)
+Verificador -> QR : POST /consultar + PIN
+QR -> Cards : Argon2id token/PIN, contador/bloqueo
+alt válido
+  QR --> Verificador : nombre mínimo, vacunas y último control
+else inválido/expirado/revocado/bloqueado
+  QR --> Verificador : error uniforme, sin revelar causa
+end
+
+newpage Alerta OMS y outbox
+actor Clinico
+participant "API SCCVI" as GrowthAPI
+database "SQL SCCVI" as Clinical
+participant "Outbox SCCVI" as Outbox
+participant Notificaciones
+participant SSO
+Clinico -> GrowthAPI : POST medición (longitud/talla)
+GrowthAPI -> Clinical : guarda medición vigente
+GrowthAPI -> Clinical : LMS OMS -> evaluación reproducible
+alt P<5 o P>95 / control ausente
+  GrowthAPI -> Clinical : alerta de seguimiento idempotente
+  GrowthAPI -> Outbox : persona_id, finalidad, variables mínimas
+  Outbox -> Notificaciones : evento idempotente
+  Notificaciones -> SSO : resuelve canales actuales
+end
+note over Clinical,SSO
+SCCVI no copia contactos. Una caída de proyección o proveedor no revierte
+la escritura clínica; la outbox permite reintento.
+end note
+
+newpage Autorización territorial
+actor Usuario
+participant "JWT/Sesión SSO" as Auth
+participant "API SCCVI" as ScopedAPI
+database "SQL SCCVI" as ScopedDB
+Usuario -> Auth : inicia sesión
+Auth --> ScopedAPI : principal (rol, permisos, territorio)
+Usuario -> ScopedAPI : reporte/búsqueda/descarga
+ScopedAPI -> ScopedAPI : valida rol y territorio
+ScopedAPI -> ScopedDB : consulta filtrada por territorio
+ScopedAPI --> Usuario : envelope o descarga autorizada
+@enduml

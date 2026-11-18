@@ -1,0 +1,30 @@
+@startuml SCCVI
+skinparam componentStyle rectangle
+actor Clinico
+actor Responsable
+component "SPA SCCVI" as spa
+component "API SCCVI\nNestJS" as api
+database "SQL Server\nSCCVI clínico" as sql
+component "SSO\nidentidad, roles, contactos" as sso
+component "Geo\ncatálogo local versionado" as geo
+component "Notificaciones" as notify
+component "Mongo/Elasticsearch\nproyección de lectura" as read
+
+Clinico --> spa
+Responsable --> spa
+spa --> api : sesión SSO / API
+api --> sso : persona_id, roles, contactos al enviar
+api --> geo : valida comunidad
+api --> sql : menores, relaciones, vacunas,\nmediciones, evaluaciones OMS, outbox
+api --> read : proyección asíncrona
+api --> notify : outbox por persona_id
+note right of sql
+OMS LMS versionado:
+estándar -> parámetros -> evaluación
+No copia CUI ni contactos.
+end note
+note bottom of geo
+Sin scraping TSE:
+sólo catálogo local normalizado y versionado.
+end note
+@enduml
