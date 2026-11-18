@@ -5,13 +5,14 @@ import { randomBytes, randomInt } from 'node:crypto';
 import * as argon2 from 'argon2';
 import { In, ObjectLiteral, Repository } from 'typeorm';
 import { AlertaVacunacion, AuditoriaSccvi, CarnePublico, EsquemaDosis, EsquemaVacunacion, JornadaVacunacion, JornadaVacuna, MedicionAntropometrica, Menor, MenorResponsable, RegistroVacunacion, Vacuna } from './entities';
-import { AplicacionDto, DosisDto, EsquemaDto, FamiliaRegistroDto, FamiliaResponsableDto, JornadaDto, MedicionDto, MenorDto, MenorQueryDto, PageDto, PersonaSearchDto, ResponsableDto, UpdateEsquemaDto, UpdateJornadaDto, UpdateMenorDto, UpdateResponsableDto, UpdateVacunaDto, VacunaDto } from './dto';
+import { AplicacionDto, ContactoRegistroDto, CorreccionMedicionDto, DosisDto, EsquemaDto, FamiliaRegistroDto, FamiliaResponsableDto, JornadaDto, JornadaNotificacionDto, MedicionDto, MenorDto, MenorQueryDto, PageDto, PersonaSearchDto, ResponsableDto, UpdateEsquemaDto, UpdateJornadaDto, UpdateMenorDto, UpdateResponsableDto, UpdateVacunaDto, VacunaDto } from './dto';
 import { GeoClient, SsoClient, type SsoCredential } from './integrations';
 import { OutboxService } from './outbox.service';
 import { SccviReadProjectionService } from './read-projection.service';
 import { ProjectionOutboxService } from './projection-outbox.service';
 import { SsoServiceTokenService } from './sso-service-token.service';
 import { SccviPrincipal } from './sso-jwt.guard';
+import { GrowthService } from './growth.service';
 
 type Page<T> = { items: T[]; meta: { current_page: number; per_page: number; total: number; last_page: number } };
 
@@ -29,7 +30,7 @@ export class SccviService {
     @InjectRepository(JornadaVacuna) private readonly jornadaVacunas: Repository<JornadaVacuna>,
     @InjectRepository(AlertaVacunacion) private readonly alertas: Repository<AlertaVacunacion>,
     @InjectRepository(AuditoriaSccvi) private readonly auditoria: Repository<AuditoriaSccvi>,
-    private readonly sso: SsoClient, private readonly geo: GeoClient, private readonly outbox: OutboxService, private readonly config: ConfigService, private readonly readProjection: SccviReadProjectionService, private readonly projectionOutbox: ProjectionOutboxService, private readonly serviceTokens: SsoServiceTokenService, @InjectRepository(CarnePublico) private readonly carnesPublicos: Repository<CarnePublico> = {} as Repository<CarnePublico>,
+    private readonly sso: SsoClient, private readonly geo: GeoClient, private readonly outbox: OutboxService, private readonly config: ConfigService, private readonly readProjection: SccviReadProjectionService, private readonly projectionOutbox: ProjectionOutboxService, private readonly serviceTokens: SsoServiceTokenService, private readonly growth: GrowthService, @InjectRepository(CarnePublico) private readonly carnesPublicos: Repository<CarnePublico> = {} as Repository<CarnePublico>,
   ) {}
 
   private async page<T extends ObjectLiteral>(repo: Repository<T>, page: PageDto, where?: object): Promise<Page<T>> {
@@ -37,6 +38,32 @@ export class SccviService {
     return { items, meta: { current_page: page.page, per_page: page.per_page, total, last_page: Math.max(1, Math.ceil(total / page.per_page)) } };
   }
   private async audit(principal: SccviPrincipal, accion: string, recurso: string, recursoId?: string, detalle?: object) { await this.auditoria.insert({ accion, recurso, recurso_id: recursoId ?? null, actor_persona_id: principal.personaId ?? null, detalle: detalle ? JSON.stringify(detalle) : null }); }
+  private contactDestination(contact: Pick<ContactoRegistroDto, 'canal' | 'destino'>) { const value = contact.destino.trim(); return contact.canal === 'EMAIL' ? value.toLowerCase() : ['WHATSAPP', 'TELEFONO'].includes(contact.canal) ? value.replace(/[\s\-()]/g, '') : value; }
+  private assertDistinctContacts(responsables: FamiliaResponsableDto[]) {
+    for (const responsible of responsables) {
+      const seen = new Set<string>();
+      for (const contact of responsible.contactos ?? []) {
+        const key = `${contact.canal}:${this.contactDestination(contact)}`;
+        if (seen.has(key)) throw new UnprocessableEntityException('No se puede registrar dos veces el mismo contacto para una persona responsable.');
+        seen.add(key);
+      }
+    }
+  }
+  /** A retry after a timeout reuses the SSO contact instead of duplicating its destination. */
+  private async ensureSsoContacts(personaId: string, contacts: ContactoRegistroDto[] | undefined, token: string) {
+    if (!contacts?.length) return;
+    let existing = await this.sso.contacts(personaId, token);
+    for (const contact of contacts) {
+      const destination = this.contactDestination(contact);
+      const matches = (candidate: { canal: string; destino: string }) => candidate.canal === contact.canal && this.contactDestination(candidate) === destination;
+      if (existing.some(matches)) continue;
+      try { const created = await this.sso.createContact(personaId, { ...contact, destino: destination }, token); existing = [...existing, created]; }
+      catch (error) {
+        existing = await this.sso.contacts(personaId, token);
+        if (!existing.some(matches)) throw error;
+      }
+    }
+  }
   private async minor(id: string) { const item = await this.menores.findOneBy({ id }); if (!item) throw new NotFoundException('Menor no encontrado.'); return item; }
   private isStaff(principal: SccviPrincipal) { return ['sccvi.read', 'sccvi.clinical', 'sccvi.admin', 'SCCVI_ADMIN', 'SCCVI_DDRISS', 'SCCVI_ESTABLECIMIENTO', 'SCCVI_CONSULTA'].some(scope => principal.scopes.includes(scope) || principal.roles.includes(scope)); }
   private isGlobalAdmin(principal: SccviPrincipal) { return ['sccvi.admin', 'SCCVI_ADMIN'].some(role => principal.scopes.includes(role) || principal.roles.includes(role)) || (principal.permissions ?? []).includes('CATALOGOS.ADMINISTRAR'); }
@@ -60,6 +87,8 @@ export class SccviService {
   }
   private async validateLocation(input: { departamento_codigo?: string; municipio_codigo?: string; comunidad_ref?: string }) { await this.geo.validateLocation(input.departamento_codigo, input.municipio_codigo, input.comunidad_ref); }
   private serviceToken() { return this.serviceTokens.get(); }
+  /** Prefer the authenticated SSO session for request-bound directory access. */
+  private async ssoCredential(principal?: SccviPrincipal): Promise<SsoCredential> { return principal?.ssoSessionCookie ? { cookie: principal.ssoSessionCookie } : this.serviceToken(); }
   private dateAtNoon(value: string) { return new Date(`${value}T12:00:00Z`); }
   private ageInDays(birthday: string, date: string) { return Math.floor((this.dateAtNoon(date).getTime() - this.dateAtNoon(birthday).getTime()) / 86_400_000); }
   /** Historic catalog versions must never create new cards or alert schedules. */
@@ -75,14 +104,12 @@ export class SccviService {
     const ids = [...new Set(matches.map(item => item.id))];
     return ids.length ? ids : [dose.id];
   }
-  /** Prefer the authenticated SSO session for request-bound directory access. */
-  private async ssoCredential(principal?: SccviPrincipal): Promise<SsoCredential> { return principal?.ssoSessionCookie ? { cookie: principal.ssoSessionCookie } : this.serviceToken(); }
   private async requirePerson(personaId: string, principal?: SccviPrincipal) { const people = await this.sso.resolvePeople([personaId], await this.ssoCredential(principal)); if (people.length !== 1 || people[0].persona_id !== personaId) throw new UnprocessableEntityException('La persona indicada no existe o no está activa en SSO.'); return people[0]; }
 
   /** Projection failures never roll back authoritative clinical writes. */
   private projectLater(menorId: string) { void this.projectionOutbox.enqueue(menorId).catch(() => undefined); }
 
-  async searchPeople(query: PersonaSearchDto, principal?: SccviPrincipal) { return this.sso.search(query, await this.ssoCredential(principal)); }
+  async searchPeople(query: PersonaSearchDto, principal: SccviPrincipal) { return this.sso.search(query, await this.ssoCredential(principal)); }
   async getPerson(personaId: string, principal: SccviPrincipal) {
     const ownProfile = principal.personaId === personaId;
     let relatedChild = false;
@@ -152,18 +179,21 @@ export class SccviService {
     const responsibleCuis = input.responsables.map(person => person.cui);
     if (responsibleCuis.includes(input.menor.cui)) throw new UnprocessableEntityException('El menor no puede figurar como su propio responsable.');
     if (new Set(responsibleCuis).size !== responsibleCuis.length) throw new UnprocessableEntityException('No se puede registrar dos veces al mismo responsable.');
+    this.assertDistinctContacts(input.responsables);
     await this.validateLocation(input);
     const token = await this.serviceToken();
     const create = async (person: Record<string, unknown>) => {
-      try { return await this.sso.createPerson(person, token, `sccvi-family:${String(person.cui)}`); }
+      const identity = { ...person }; delete identity.contactos;
+      try { return await this.sso.createPerson(identity, token, `sccvi-family:${String(identity.cui)}`); }
       catch (error) {
-        const existing = await this.sso.search({ cui: String(person.cui), per_page: 1 }, token);
+        const existing = await this.sso.search({ cui: String(identity.cui), per_page: 1 }, token);
         if (existing.length === 1) return existing[0];
         throw error;
       }
     };
     const child = await create(input.menor as unknown as Record<string, unknown>);
     const people = await Promise.all(input.responsables.map(person => create(person as unknown as Record<string, unknown>)));
+    for (let index = 0; index < people.length; index += 1) await this.ensureSsoContacts(people[index].persona_id, input.responsables[index].contactos, token);
     const minor = await this.createMenor({ persona_id: child.persona_id, direccion_ref: input.direccion_ref, departamento_codigo: input.departamento_codigo, municipio_codigo: input.municipio_codigo, comunidad_ref: input.comunidad_ref, observaciones: input.observaciones }, principal);
     const links = [];
     for (let index = 0; index < input.responsables.length; index += 1) links.push(await this.createResponsable(minor.id, { persona_id: people[index].persona_id, tipo_relacion: input.responsables[index].tipo_relacion, fecha_inicio: new Date().toISOString().slice(0, 10) }, principal));
@@ -176,14 +206,17 @@ export class SccviService {
   /** Creates or reuses the guardian identity, then adds the clinical link. */
   async registerResponsable(menorId: string, input: FamiliaResponsableDto, principal: SccviPrincipal) {
     await this.minor(menorId);
+    this.assertDistinctContacts([input]);
     const token = await this.serviceToken();
+    const { contactos, ...identity } = input;
     let person;
-    try { person = await this.sso.createPerson(input as unknown as Record<string, unknown>, token, `sccvi-responsable:${input.cui}`); }
+    try { person = await this.sso.createPerson(identity as unknown as Record<string, unknown>, token, `sccvi-responsable:${input.cui}`); }
     catch (error) {
       const existing = await this.sso.search({ cui: input.cui, per_page: 1 }, token);
       if (existing.length !== 1) throw error;
       person = existing[0];
     }
+    await this.ensureSsoContacts(person.persona_id, contactos, token);
     return this.createResponsable(menorId, { persona_id: person.persona_id, tipo_relacion: input.tipo_relacion, fecha_inicio: new Date().toISOString().slice(0, 10) }, principal);
   }
   async createResponsable(menorId: string, input: ResponsableDto, principal: SccviPrincipal) { await this.minor(menorId); await this.requirePerson(input.persona_id, principal); try { const item = await this.responsables.save(this.responsables.create({ ...input, menor_id: menorId, fecha_fin: input.fecha_fin ?? null, estado: input.estado ?? true, created_by_persona_id: principal.personaId ?? null, updated_by_persona_id: principal.personaId ?? null })); await this.audit(principal, 'CREATE', 'menor_responsable', item.id); this.projectLater(menorId); return item; } catch (error) { if (error instanceof UnprocessableEntityException || error instanceof ServiceUnavailableException) throw error; throw new ConflictException('La relación responsable-menor ya existe.'); } }
@@ -214,7 +247,7 @@ export class SccviService {
     const currentById = new Map(doses.map(dose => [dose.id, dose])); const missingDefinitionIds = [...new Set(records.map(record => record.esquema_dosis_id).filter(id => !currentById.has(id)))]; const historicDefinitions = missingDefinitionIds.length ? await this.dosis.findBy({ id: In(missingDefinitionIds) }) : []; const definitionById = new Map([...doses, ...historicDefinitions].map(dose => [dose.id, dose]));
     const equivalentKey = (dose: Pick<EsquemaDosis, 'vacuna_id' | 'orden'>) => `${dose.vacuna_id}:${dose.orden}`; const byVaccine = new Map(vaccines.map(vaccine => [vaccine.id, vaccine])); const byEquivalentDose = new Map<string, RegistroVacunacion[]>(); for (const record of records) { const definition = definitionById.get(record.esquema_dosis_id); if (!definition) continue; const key = equivalentKey(definition); byEquivalentDose.set(key, [...(byEquivalentDose.get(key) ?? []), record].sort((a, b) => b.fecha_aplicacion.localeCompare(a.fecha_aplicacion))); }
     const today = new Date().toISOString().slice(0, 10);
-    return { menor_id: minor.id, persona_id: minor.persona_id, esquema: { esquema_id: schema.id, codigo: schema.codigo, nombre: schema.nombre, vigencia_desde: schema.vigencia_desde }, dosis: doses.map(dose => { const scheduled = new Date(`${birthday}T12:00:00Z`); scheduled.setUTCDate(scheduled.getUTCDate() + dose.edad_minima_dias); const vaccine = byVaccine.get(dose.vacuna_id); const applications = byEquivalentDose.get(equivalentKey(dose)) ?? []; const latest = applications[0]; const due = new Date(`${latest?.fecha_aplicacion ?? scheduled.toISOString().slice(0, 10)}T12:00:00Z`); if (latest && dose.intervalo_repeticion_dias) due.setUTCDate(due.getUTCDate() + dose.intervalo_repeticion_dias); const recurring = Boolean(dose.intervalo_repeticion_dias); return { esquema_dosis_id: dose.id, vacuna_id: dose.vacuna_id, vacuna_codigo: vaccine?.codigo ?? null, vacuna_nombre: vaccine?.nombre ?? null, orden: dose.orden, edad_minima_dias: dose.edad_minima_dias, edad_maxima_dias: dose.edad_maxima_dias, intervalo_repeticion_dias: dose.intervalo_repeticion_dias, fecha_programada: due.toISOString().slice(0, 10), fecha_aplicacion: latest?.fecha_aplicacion ?? null, aplicaciones: applications.map(record => ({ secuencia: record.secuencia, fecha_aplicacion: record.fecha_aplicacion })), estado: latest && !recurring ? 'APLICADA' : latest && due.toISOString().slice(0, 10) > today ? 'VIGENTE' : 'PENDIENTE' }; }) };
+    return { menor_id: minor.id, persona_id: minor.persona_id, esquema: { esquema_id: schema.id, codigo: schema.codigo, nombre: schema.nombre, vigencia_desde: schema.vigencia_desde }, dosis: doses.map(dose => { const scheduled = new Date(`${birthday}T12:00:00Z`); scheduled.setUTCDate(scheduled.getUTCDate() + dose.edad_minima_dias); const vaccine = byVaccine.get(dose.vacuna_id); const applications = byEquivalentDose.get(equivalentKey(dose)) ?? []; const latest = applications[0]; const due = new Date(`${latest?.fecha_aplicacion ?? scheduled.toISOString().slice(0, 10)}T12:00:00Z`); if (latest && dose.intervalo_repeticion_dias) due.setUTCDate(due.getUTCDate() + dose.intervalo_repeticion_dias); const recurring = Boolean(dose.intervalo_repeticion_dias); return { esquema_dosis_id: dose.id, vacuna_id: dose.vacuna_id, vacuna_codigo: vaccine?.codigo ?? null, vacuna_nombre: vaccine?.nombre ?? null, orden: dose.orden, edad_minima_dias: dose.edad_minima_dias, edad_maxima_dias: dose.edad_maxima_dias, intervalo_repeticion_dias: dose.intervalo_repeticion_dias, fecha_programada: due.toISOString().slice(0, 10), fecha_aplicacion: latest?.fecha_aplicacion ?? null, aplicaciones: applications.map(record => ({ secuencia: record.secuencia, fecha_aplicacion: record.fecha_aplicacion, departamento_codigo: record.departamento_codigo, municipio_codigo: record.municipio_codigo, comunidad_ref: record.comunidad_ref, unidad_atencion_nombre: record.unidad_atencion_nombre })), estado: latest && !recurring ? 'APLICADA' : latest && due.toISOString().slice(0, 10) > today ? 'VIGENTE' : 'PENDIENTE' }; }) };
   }
   async applyDose(menorId: string, input: AplicacionDto, p: SccviPrincipal) { await this.minor(menorId); if (!await this.dosis.exist({ where: { id: input.esquema_dosis_id, estado: true } })) throw new UnprocessableEntityException('La dosis no está disponible.'); if (input.jornada_id && !await this.jornadas.exist({ where: { id: input.jornada_id } })) throw new UnprocessableEntityException('La jornada no existe.'); const secuencia = input.secuencia ?? 1; if (secuencia > 1) { const dose = await this.dosis.findOneBy({ id: input.esquema_dosis_id, estado: true }); if (!dose?.intervalo_repeticion_dias) throw new UnprocessableEntityException('Esta dosis no admite aplicaciones recurrentes.'); } try { const x = await this.registros.save(this.registros.create({ ...input, secuencia, menor_id: menorId, jornada_id: input.jornada_id ?? null, profesional_persona_id: p.personaId ?? null, estado: 'VALIDA', observaciones: input.observaciones ?? null, created_by_persona_id: p.personaId ?? null, updated_by_persona_id: p.personaId ?? null })); await this.audit(p, 'APPLY', 'registro_vacunacion', x.id); this.projectLater(menorId); return x; } catch { throw new ConflictException('Ya existe una aplicación válida con esa secuencia para el menor.'); } }
   /** Applies clinical eligibility in the authoritative write path, never in the browser. */
@@ -254,7 +287,7 @@ export class SccviService {
     if (!location.departamento_codigo || !location.municipio_codigo) throw new UnprocessableEntityException('Indica el lugar donde se aplicó la vacuna.');
     await this.validateLocation(location);
     try {
-      const saved = await this.registros.save(this.registros.create({ ...input, ...location, secuencia: sequence, menor_id: menorId, jornada_id: input.jornada_id ?? null, profesional_persona_id: principal.personaId ?? null, estado: 'VALIDA', observaciones: input.observaciones ?? null, created_by_persona_id: principal.personaId ?? null, updated_by_persona_id: principal.personaId ?? null }));
+      const saved = await this.registros.save(this.registros.create({ ...input, ...location, secuencia: sequence, menor_id: menorId, jornada_id: input.jornada_id ?? null, profesional_persona_id: principal.personaId ?? null, unidad_atencion_tag: principal.organizationUnit?.tag ?? null, unidad_atencion_nombre: principal.organizationUnit?.nombre ?? null, estado: 'VALIDA', observaciones: input.observaciones ?? null, created_by_persona_id: principal.personaId ?? null, updated_by_persona_id: principal.personaId ?? null }));
       const alert = await this.alertas.findOneBy({ menor_id: menorId, esquema_dosis_id: dose.id });
       if (alert) { alert.estado = 'RESUELTA'; alert.updated_by_persona_id = principal.personaId ?? null; await this.alertas.save(alert); }
       await this.audit(principal, 'APPLY', 'registro_vacunacion', saved.id); this.projectLater(menorId); return saved;
@@ -315,8 +348,33 @@ export class SccviService {
     await this.audit(principal, 'REVOKE', 'carne_publico', card.id); return null;
   }
 
-  async measurements(menorId: string, page: PageDto, principal: SccviPrincipal) { await this.minor(menorId); await this.assertAccess(menorId, principal); return this.page(this.mediciones, page, { menor_id: menorId }); }
-  async addMeasurement(menorId: string, input: MedicionDto, p: SccviPrincipal) { const minor = await this.minor(menorId); const today = new Date().toISOString().slice(0, 10); if (input.fecha > today) throw new UnprocessableEntityException('La fecha de medición no puede estar en el futuro.'); const person = await this.requirePerson(minor.persona_id); if (person.fecha_nacimiento && input.fecha < person.fecha_nacimiento) throw new UnprocessableEntityException('La medición no puede ser anterior al nacimiento.'); const imc = (input.peso_kg / ((input.talla_cm / 100) ** 2)).toFixed(2); try { const saved = await this.mediciones.save(this.mediciones.create({ menor_id: menorId, fecha: input.fecha, peso_kg: input.peso_kg.toFixed(2), talla_cm: input.talla_cm.toFixed(2), imc, observaciones: input.observaciones ?? null, created_by_persona_id: p.personaId ?? null, updated_by_persona_id: p.personaId ?? null })); await this.audit(p, 'CREATE', 'medicion_antropometrica', saved.id); this.projectLater(menorId); return saved; } catch (error) { if (error instanceof UnprocessableEntityException || error instanceof BadGatewayException || error instanceof ServiceUnavailableException) throw error; throw new ConflictException('Ya existe una medición para ese menor y fecha.'); } }
+  async measurements(menorId: string, page: PageDto, principal: SccviPrincipal) {
+    await this.minor(menorId); await this.assertAccess(menorId, principal);
+    const result = await this.page(this.mediciones, page, { menor_id: menorId });
+    return { ...result, items: await Promise.all(result.items.map(async measurement => ({ ...measurement, evaluaciones: await this.growth.forMeasurement(measurement.id) }))) };
+  }
+  async growthCurves(menorId: string, principal: SccviPrincipal) { const minor = await this.minor(menorId); await this.assertAccess(menorId, principal); return this.growth.weightForAgeCurves(await this.requirePerson(minor.persona_id, principal)); }
+  async growthAlerts(menorId: string, principal: SccviPrincipal) { await this.minor(menorId); await this.assertAccess(menorId, principal); return this.growth.alertsForMinor(menorId); }
+  private async saveMeasurement(menorId: string, input: MedicionDto, p: SccviPrincipal, correction?: { corrige_medicion_id: string; motivo_correccion: string }) {
+    const minor = await this.minor(menorId); const today = new Date().toISOString().slice(0, 10);
+    if (input.fecha > today) throw new UnprocessableEntityException('La fecha de medición no puede estar en el futuro.');
+    const person = await this.requirePerson(minor.persona_id, p);
+    if (person.fecha_nacimiento && input.fecha < person.fecha_nacimiento) throw new UnprocessableEntityException('La medición no puede ser anterior al nacimiento.');
+    await this.growth.ensureAvailable();
+    const imc = (input.peso_kg / ((input.talla_cm / 100) ** 2)).toFixed(2);
+    try {
+      const saved = await this.mediciones.save(this.mediciones.create({ menor_id: menorId, fecha: input.fecha, peso_kg: input.peso_kg.toFixed(2), talla_cm: input.talla_cm.toFixed(2), imc, tipo_medicion: input.tipo_medicion, estado: 'VIGENTE', corrige_medicion_id: correction?.corrige_medicion_id ?? null, motivo_correccion: correction?.motivo_correccion ?? null, observaciones: input.observaciones ?? null, created_by_persona_id: p.personaId ?? null, updated_by_persona_id: p.personaId ?? null }));
+      const evaluation = await this.growth.evaluate(saved, person, p, input.sexo_curva_evaluacion); await this.audit(p, correction ? 'CORRECT' : 'CREATE', 'medicion_antropometrica', saved.id, correction); this.projectLater(menorId); return { ...saved, crecimiento: evaluation };
+    } catch (error) { if (error instanceof UnprocessableEntityException || error instanceof BadGatewayException || error instanceof ServiceUnavailableException) throw error; throw new ConflictException('Ya existe una medición vigente para ese menor y fecha.'); }
+  }
+  async addMeasurement(menorId: string, input: MedicionDto, p: SccviPrincipal) { return this.saveMeasurement(menorId, input, p); }
+  async correctMeasurement(menorId: string, measurementId: string, input: CorreccionMedicionDto, p: SccviPrincipal) {
+    const prior = await this.mediciones.findOneBy({ id: measurementId, menor_id: menorId, estado: 'VIGENTE' }); if (!prior) throw new NotFoundException('Medición vigente no encontrada.');
+    if (prior.fecha !== input.fecha) throw new UnprocessableEntityException('La corrección debe conservar la fecha clínica de la medición original.');
+    await this.mediciones.update(prior.id, { estado: 'CORREGIDA', updated_by_persona_id: p.personaId ?? null });
+    try { const created = await this.saveMeasurement(menorId, input, p, { corrige_medicion_id: prior.id, motivo_correccion: input.motivo_correccion }); await this.growth.resolveAlertsForSupersededMeasurement(prior.id, p); await this.audit(p, 'SUPERSEDE', 'medicion_antropometrica', prior.id, { reemplazada_por: created.id, motivo: input.motivo_correccion }); return created; }
+    catch (error) { await this.mediciones.update(prior.id, { estado: 'VIGENTE', updated_by_persona_id: p.personaId ?? null }); throw error; }
+  }
 
   async listJornadas(page: PageDto) { return this.page(this.jornadas, page); }
   async createJornada(input: JornadaDto, p: SccviPrincipal) { if (input.fecha_fin < input.fecha_inicio) throw new UnprocessableEntityException('La fecha final no puede ser anterior a la inicial.'); await this.validateLocation(input); const x = await this.jornadas.save(this.jornadas.create({ nombre: input.nombre, fecha_inicio: input.fecha_inicio, fecha_fin: input.fecha_fin, direccion_ref: input.direccion_ref ?? null, departamento_codigo: input.departamento_codigo ?? null, municipio_codigo: input.municipio_codigo ?? null, comunidad_ref: input.comunidad_ref ?? null, estado: input.estado ?? 'PLANIFICADA', created_by_persona_id: p.personaId ?? null, updated_by_persona_id: p.personaId ?? null })); for (const vacunaId of input.vacuna_ids ?? []) { if (!await this.vacunas.exist({ where: { id: vacunaId, estado: true } })) throw new UnprocessableEntityException('Una vacuna de la jornada no existe o está inactiva.'); await this.jornadaVacunas.save(this.jornadaVacunas.create({ jornada_id: x.id, vacuna_id: vacunaId, existencias: null, estado: true, created_by_persona_id: p.personaId ?? null, updated_by_persona_id: p.personaId ?? null })); } await this.audit(p, 'CREATE', 'jornada', x.id); return x; }
@@ -343,8 +401,8 @@ export class SccviService {
     return { menores: minorIds.length, destinatarios: recipients.length, encolados: recipients.length };
   }
 
-  /** Only guardians of children with an actionable pending dose receive a campaign notice. */
-  async notifyEligibleJornada(id: string, input: { titulo?: string; contenido?: string }, p: SccviPrincipal) {
+  /** Builds the audience before a campaign can enqueue any notification. */
+  private async eligibleJornadaAudience(id: string, input: JornadaNotificacionDto) {
     const jornada = await this.jornadas.findOneBy({ id });
     if (!jornada) throw new NotFoundException('Jornada no encontrada.');
     if (!jornada.departamento_codigo && !jornada.municipio_codigo && !jornada.comunidad_ref) throw new UnprocessableEntityException('La jornada debe indicar departamento, municipio o comunidad antes de notificar.');
@@ -352,19 +410,46 @@ export class SccviService {
     if (!campaignVaccines.length) throw new UnprocessableEntityException('Selecciona al menos una vacuna para notificar esta jornada.');
     const doseRows = await this.dosis.find({ where: { estado: true, vacuna_id: In(campaignVaccines.map(item => item.vacuna_id)) } });
     const doseIds = new Set(doseRows.map(item => item.id));
-    const minors = await this.menores.find({ where: { estado: true, ...(jornada.departamento_codigo ? { departamento_codigo: jornada.departamento_codigo } : {}), ...(jornada.municipio_codigo ? { municipio_codigo: jornada.municipio_codigo } : {}), ...(jornada.comunidad_ref ? { comunidad_ref: jornada.comunidad_ref } : {}) } });
-    const minorIds = minors.map(minor => minor.id);
-    const actionable = minorIds.length ? await this.alertas.find({ where: { menor_id: In(minorIds), estado: 'PENDIENTE' } }) : [];
-    const eligibleIds = new Set(actionable.filter(alert => alert.tipo !== 'PENDIENTE' && doseIds.has(alert.esquema_dosis_id)).map(alert => alert.menor_id));
+    if (input.edad_maxima_meses !== undefined && input.edad_minima_meses !== undefined && input.edad_maxima_meses < input.edad_minima_meses) throw new UnprocessableEntityException('La edad máxima no puede ser menor a la edad mínima.');
+    const territorial = await this.menores.find({ where: { estado: true, ...(jornada.departamento_codigo ? { departamento_codigo: jornada.departamento_codigo } : {}), ...(jornada.municipio_codigo ? { municipio_codigo: jornada.municipio_codigo } : {}), ...(jornada.comunidad_ref ? { comunidad_ref: jornada.comunidad_ref } : {}) } });
+    const people = territorial.length ? await this.sso.resolvePeople(territorial.map(minor => minor.persona_id), await this.serviceToken()) : [];
+    const birthdays = new Map(people.filter(person => /^\d{4}-\d{2}-\d{2}$/.test(person.fecha_nacimiento ?? '')).map(person => [person.persona_id, person.fecha_nacimiento!]));
+    const dated = territorial.filter(minor => {
+      if (input.edad_minima_meses === undefined && input.edad_maxima_meses === undefined) return true;
+      const birthday = birthdays.get(minor.persona_id); if (!birthday) return false;
+      const ageMonths = this.ageInDays(birthday, jornada.fecha_inicio) / 30.4375;
+      return (input.edad_minima_meses === undefined || ageMonths >= input.edad_minima_meses) && (input.edad_maxima_meses === undefined || ageMonths <= input.edad_maxima_meses);
+    });
+    const minorIds = dated.map(minor => minor.id);
+    const status = input.estado_vacuna ?? 'PENDIENTE';
+    const eligibleIds = new Set<string>();
+    if (minorIds.length && status === 'PENDIENTE') {
+      const actionable = await this.alertas.find({ where: { menor_id: In(minorIds), estado: 'PENDIENTE' } });
+      for (const alert of actionable) if (alert.tipo !== 'PENDIENTE' && doseIds.has(alert.esquema_dosis_id)) eligibleIds.add(alert.menor_id);
+    }
+    if (minorIds.length && status === 'APLICADA') {
+      const applications = await this.registros.find({ where: { menor_id: In(minorIds), esquema_dosis_id: In([...doseIds]), estado: 'VALIDA' } });
+      for (const application of applications) eligibleIds.add(application.menor_id);
+    }
     const links = eligibleIds.size ? await this.responsables.find({ where: { menor_id: In([...eligibleIds]), estado: true } }) : [];
     const scope = jornada.comunidad_ref ? 'su comunidad' : jornada.municipio_codigo ? 'su municipio' : 'su departamento';
+    const recipientMinors = new Map<string, string[]>();
+    for (const link of links) recipientMinors.set(link.persona_id, [...(recipientMinors.get(link.persona_id) ?? []), link.menor_id]);
+    return { jornada, scope, campaignVaccines, recipientMinors, menores_territorio: territorial.length, menores_rango_edad: dated.length, menores: eligibleIds.size, destinatarios: recipientMinors.size, estado_vacuna: status, filtro_edad: { edad_minima_meses: input.edad_minima_meses ?? null, edad_maxima_meses: input.edad_maxima_meses ?? null } };
+  }
+
+  /** A human action must explicitly confirm the reviewed audience before dispatch. */
+  async notifyEligibleJornada(id: string, input: JornadaNotificacionDto, p: SccviPrincipal) {
+    const audience = await this.eligibleJornadaAudience(id, input);
+    const preview = { menores_territorio: audience.menores_territorio, menores_rango_edad: audience.menores_rango_edad, menores: audience.menores, destinatarios: audience.destinatarios, estado_vacuna: audience.estado_vacuna, filtro_edad: audience.filtro_edad };
+    if (input.confirmar_envio !== true) return { vista_previa: true, ...preview, encolados: 0 };
     let queued = 0;
-    for (const link of links) {
-      await this.outbox.enqueue(link.persona_id, link.menor_id, 'SCCVI_JORNADA', { jornada_id: jornada.id, jornada_nombre: jornada.nombre, fecha_inicio: jornada.fecha_inicio, fecha_fin: jornada.fecha_fin, alcance: scope }, `jornada:${jornada.id}:menor:${link.menor_id}:persona:${link.persona_id}`, { titulo: input.titulo ?? 'Jornada de vacunación', contenido: input.contenido ?? `Hay una jornada de vacunación para una dosis pendiente de su menor en ${scope}.` });
+    for (const [personaId, linkedMinors] of audience.recipientMinors) {
+      await this.outbox.enqueue(personaId, null, 'SCCVI_JORNADA', { jornada_id: audience.jornada.id, jornada_nombre: audience.jornada.nombre, fecha_inicio: audience.jornada.fecha_inicio, fecha_fin: audience.jornada.fecha_fin, alcance: audience.scope, menores_ids: linkedMinors.join(','), estado_vacuna: audience.estado_vacuna }, `jornada:${audience.jornada.id}:persona:${personaId}`, { titulo: input.titulo ?? 'Jornada de vacunación', contenido: input.contenido ?? `Hay una jornada de vacunación para una dosis ${audience.estado_vacuna.toLowerCase()} de su menor en ${audience.scope}.` });
       queued += 1;
     }
-    await this.audit(p, 'NOTIFY', 'jornada', jornada.id, { menores: eligibleIds.size, destinatarios: queued, vacunas: campaignVaccines.map(item => item.vacuna_id) });
-    return { menores: eligibleIds.size, destinatarios: queued, encolados: queued };
+    await this.audit(p, 'NOTIFY', 'jornada', audience.jornada.id, { ...preview, vacunas: audience.campaignVaccines.map(item => item.vacuna_id) });
+    return { vista_previa: false, ...preview, encolados: queued };
   }
 
   async notifyTomorrowJornadas() {
@@ -373,7 +458,7 @@ export class SccviService {
     const principal: SccviPrincipal = { userId: '0', scopes: ['sccvi.admin'], roles: ['SYSTEM'], permissions: ['CATALOGOS.ADMINISTRAR'], payload: { sub: '0' } };
     await this.recalculateAlerts(principal);
     const results = [];
-    for (const campaign of campaigns) results.push(await this.notifyEligibleJornada(campaign.id, {}, principal));
+    for (const campaign of campaigns) results.push(await this.notifyEligibleJornada(campaign.id, { confirmar_envio: true }, principal));
     return { jornadas: campaigns.length, resultados: results };
   }
 
@@ -424,7 +509,8 @@ export class SccviService {
       }
       count++;
     }
-    await this.audit(p, 'RECALCULATE', 'alertas_vacunacion', undefined, { recalculadas: count }); for (const minor of minors) this.projectLater(minor.id); return { recalculadas: count };
+    const missingControls = await this.growth.recalculateMissedControls(minors, persons, p);
+    await this.audit(p, 'RECALCULATE', 'alertas_vacunacion', undefined, { recalculadas: count, controles_ausentes_actualizados: missingControls }); for (const minor of minors) this.projectLater(minor.id); return { recalculadas: count };
   }
   async coverage(principal: SccviPrincipal) {
     const territory = await this.territoryFor(principal);
@@ -450,6 +536,8 @@ export class SccviService {
     const vaccines = await this.registros.createQueryBuilder('r').innerJoin(EsquemaDosis, 'd', 'd.id = r.esquema_dosis_id').innerJoin(Vacuna, 'v', 'v.id = d.vacuna_id').select('v.codigo', 'codigo').addSelect('v.nombre', 'nombre').addSelect('COUNT(*)', 'aplicaciones').where('r.estado = :estado', { estado: 'VALIDA' }).andWhere(territory.departamento_codigo ? 'r.departamento_codigo = :departamento' : '1=1', { departamento: territory.departamento_codigo }).andWhere(territory.municipio_codigo ? 'r.municipio_codigo = :municipio' : '1=1', { municipio: territory.municipio_codigo }).groupBy('v.codigo').addGroupBy('v.nombre').orderBy('COUNT(*)', 'DESC').take(10).getRawMany<{ codigo: string; nombre: string; aplicaciones: string }>();
     return { puntos: points.map(point => ({ ...point, aplicaciones: Number(point.aplicaciones) })), vacunas: vaccines.map(vaccine => ({ ...vaccine, aplicaciones: Number(vaccine.aplicaciones) })) };
   }
+  async growthReport(principal: SccviPrincipal) { const territory = await this.territoryFor(principal); const minorIds = (await this.menores.find({ where: { estado: true, ...territory }, select: { id: true } })).map(item => item.id); return this.growth.reportForMinors(minorIds); }
+  async growthReportMetadata() { return this.growth.reportingMetadata(); }
   async pendingReport(page: PageDto, principal: SccviPrincipal) {
     const territory = await this.territoryFor(principal);
     if (!territory.departamento_codigo && !territory.municipio_codigo) return this.alertPage(page, { estado: 'PENDIENTE' });

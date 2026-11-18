@@ -12,6 +12,9 @@ import { SccviReadProjectionService } from './read-projection.service';
 import { ProjectionOutboxService } from './projection-outbox.service';
 import { SsoServiceTokenService } from './sso-service-token.service';
 import { CampaignReminderService } from './campaign-reminder.service';
+import { GrowthService } from './growth.service';
+import { ReportExportService } from './report-export.service';
+import { PublicCardRateLimitGuard } from './public-card-rate-limit.guard';
 
 @Module({
   imports: [ConfigModule.forRoot({ isGlobal: true }), TypeOrmModule.forRootAsync({
@@ -20,6 +23,6 @@ import { CampaignReminderService } from './campaign-reminder.service';
     }),
   }), TypeOrmModule.forFeature([...entities])],
   controllers: [SccviController],
-  providers: [SccviService, SsoClient, GeoClient, NotificationsClient, OutboxService, SccviReadProjectionService, ProjectionOutboxService, SsoServiceTokenService, CampaignReminderService, { provide: APP_GUARD, useClass: SsoJwtGuard }],
+  providers: [SccviService, GrowthService, ReportExportService, SsoClient, GeoClient, NotificationsClient, OutboxService, SccviReadProjectionService, ProjectionOutboxService, SsoServiceTokenService, CampaignReminderService, PublicCardRateLimitGuard, { provide: APP_GUARD, useClass: SsoJwtGuard }],
 })
 export class AppModule {}

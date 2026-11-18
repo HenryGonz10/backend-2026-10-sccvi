@@ -11,7 +11,7 @@ async function bootstrap() {
   app.useGlobalInterceptors(new ApiResponseInterceptor());
   app.useGlobalFilters(new ApiExceptionFilter());
   app.enableCors({ origin: (process.env.CORS_ORIGINS ?? '').split(',').filter(Boolean), credentials: true });
-  SwaggerModule.setup('api/documentation', app, SwaggerModule.createDocument(app, new DocumentBuilder().setTitle('SCCVI').setDescription('Control de vacunación infantil de Guatemala').setVersion('v1').addBearerAuth().build()));
+  SwaggerModule.setup('api/documentation', app, SwaggerModule.createDocument(app, new DocumentBuilder().setTitle('SCCVI').setDescription('Control de vacunación infantil de Guatemala. Las respuestas JSON usan `{ valid, data, msg }`; las colecciones agregan `meta` para paginación. Errores: 401 sin sesión, 403 sin permiso, 404 sin revelar menores ajenos, 409 por versión y 422 por validación. Las descargas PDF/XLSX son binarias y conservan la misma autorización territorial.').setVersion('v1').addBearerAuth().build()));
   await app.listen(Number(process.env.PORT ?? 8200), '0.0.0.0');
 }
 void bootstrap();

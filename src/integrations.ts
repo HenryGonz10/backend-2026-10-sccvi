@@ -5,6 +5,7 @@ type Envelope<T> = { valid: boolean; data: T; msg: string; meta?: { current_page
 const endpoint = (base: string, path: string) => new URL(path, base.endsWith('/') ? base : `${base}/`);
 const authorization = (token: string) => token.startsWith('Bearer ') ? token : `Bearer ${token}`;
 export type SsoPerson = { persona_id: string; cui?: string; ncompleto: string; fecha_nacimiento?: string; sexo?: string; direccion_ref?: string | null; departamento_codigo?: string | null; municipio_codigo?: string | null; comunidad_ref?: string | null; contactos?: Array<{ canal: string; destino: string; estado: boolean }> };
+export type SsoContact = { contacto_id: string; canal: string; destino: string; etiqueta?: string | null; prioridad: number; estado: boolean; verificado_at?: string | null; version: string };
 export type SsoCredential = string | { cookie: string };
 
 @Injectable()
@@ -41,7 +42,8 @@ export class SsoClient {
     } while (page <= lastPage);
     return result;
   }
-  contacts(personaId: string, credential: SsoCredential) { return this.request<Array<{ canal: string; destino: string; estado: boolean }>>(`personas/${personaId}/contactos`, { headers: this.contextHeaders(credential) }); }
+  contacts(personaId: string, credential: SsoCredential) { return this.request<SsoContact[]>(`personas/${personaId}/contactos`, { headers: this.contextHeaders(credential) }); }
+  createContact(personaId: string, input: Record<string, unknown>, credential: SsoCredential) { return this.request<SsoContact>(`personas/${personaId}/contactos`, { method: 'POST', headers: { ...this.contextHeaders(credential), 'Content-Type': 'application/json' }, body: JSON.stringify(input) }); }
 }
 
 @Injectable()

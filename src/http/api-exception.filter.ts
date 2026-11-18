@@ -16,7 +16,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
     const detail = body.message ?? raw;
     const errors = Array.isArray(detail) ? detail : undefined;
     const msg = errors ? 'Error de validación.' : typeof detail === 'string' ? detail : 'Error interno del servicio.';
-    const code = status === 401 ? 'UNAUTHORIZED' : status === 403 ? 'FORBIDDEN' : status === 404 ? 'NOT_FOUND' : status === 409 ? 'CONFLICT' : status === 422 ? 'VALIDATION_ERROR' : status >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR';
+    const code = status === 401 ? 'UNAUTHORIZED' : status === 403 ? 'FORBIDDEN' : status === 404 ? 'NOT_FOUND' : status === 409 ? 'CONFLICT' : status === 422 ? 'VALIDATION_ERROR' : status === 429 ? 'RATE_LIMITED' : status >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR';
     const envelope = failure(msg, null, { code, ...(errors ? { errors } : {}), ...((request.headers['x-correlation-id'] ?? request.headers['x-request-id']) ? { correlationId: request.headers['x-correlation-id'] ?? request.headers['x-request-id'] } : {}) });
     if (typeof response.status === 'function') {
       response.setHeader('Cache-Control', 'no-store, private');

@@ -1,10 +1,13 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Response } from 'express';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { AplicacionDto, DosisDto, EsquemaDto, FamiliaRegistroDto, FamiliaResponsableDto, JornadaDto, JornadaNotificacionDto, MedicionDto, MenorDto, MenorQueryDto, PageDto, PersonaSearchDto, PublicCardPinDto, ReadProjectionQueryDto, ResponsableDto, UpdateEsquemaDto, UpdateJornadaDto, UpdateMenorDto, UpdateResponsableDto, UpdateVacunaDto, VacunaDto, VersionDto } from './dto';
+import { AplicacionDto, CorreccionMedicionDto, DosisDto, EsquemaDto, FamiliaRegistroDto, FamiliaResponsableDto, JornadaDto, JornadaNotificacionDto, MedicionDto, MenorDto, MenorQueryDto, PageDto, PersonaSearchDto, PublicCardPinDto, ReadProjectionQueryDto, ResponsableDto, UpdateEsquemaDto, UpdateJornadaDto, UpdateMenorDto, UpdateResponsableDto, UpdateVacunaDto, VacunaDto, VersionDto } from './dto';
 import { SccviReadProjectionService } from './read-projection.service';
 import { SccviService } from './sccvi.service';
+import { ReportExportService } from './report-export.service';
 import { requireScope, SccviPrincipal } from './sso-jwt.guard';
 import { Public } from './public.decorator';
+import { PublicCardRateLimitGuard } from './public-card-rate-limit.guard';
 
 const admin = (p: SccviPrincipal) => requireScope(p, 'sccvi.admin');
 const clinician = (p: SccviPrincipal) => requireScope(p, 'sccvi.clinical', 'sccvi.admin');
@@ -12,11 +15,11 @@ const reader = (p: SccviPrincipal) => requireScope(p, 'sccvi.read', 'sccvi.clini
 
 @ApiTags('SCCVI') @ApiBearerAuth() @Controller('api/v1')
 export class SccviController {
-  constructor(private readonly service: SccviService, private readonly readProjection: SccviReadProjectionService) {}
+  constructor(private readonly service: SccviService, private readonly readProjection: SccviReadProjectionService, private readonly exports: ReportExportService) {}
   private p(req: { principal: SccviPrincipal }) { return req.principal; }
 
   @Public() @Get('health') health() { return { status: 'ok' }; }
-  @Get('sesion') session(@Req() r: { principal: SccviPrincipal }) { const p = this.p(r); return { user_id: p.userId, persona_id: p.personaId ?? null, scopes: p.scopes, roles: p.roles, permissions: p.permissions }; }
+  @Get('sesion') session(@Req() r: { principal: SccviPrincipal }) { const p = this.p(r); return { user_id: p.userId, persona_id: p.personaId ?? null, scopes: p.scopes, roles: p.roles, permissions: p.permissions, territorio: p.territory ?? null, unidad: p.organizationUnit ?? null }; }
   @Get('personas/buscar') searchPeople(@Query() q: PersonaSearchDto, @Req() r: { principal: SccviPrincipal }) { const principal = this.p(r); reader(principal); return this.service.searchPeople(q, principal); }
   @Get('personas/:personaId/menores') dependents(@Param('personaId') personaId: string, @Req() r: { principal: SccviPrincipal }) { return this.service.dependentsForPerson(personaId, this.p(r)); }
   @Get('personas/:personaId') person(@Param('personaId') personaId: string, @Req() r: { principal: SccviPrincipal }) { return this.service.getPerson(personaId, this.p(r)); }
@@ -45,11 +48,13 @@ export class SccviController {
   @Get('menores/:id/carne-vacunacion') carne(@Param('id') id: string, @Req() r: { principal: SccviPrincipal }) { return this.service.vaccinationCard(id, this.p(r)); }
   @Post('menores/:id/carne-publico') publicCard(@Param('id') id: string, @Req() r: { principal: SccviPrincipal }) { return this.service.createPublicCard(id, this.p(r)); }
   @Delete('menores/:id/carne-publico/:token') @HttpCode(200) revokePublicCard(@Param('id') id: string, @Param('token') token: string, @Req() r: { principal: SccviPrincipal }) { return this.service.revokePublicCard(id, token, this.p(r)); }
-  @Public() @Get('public/carnes/:token') publicCardStatus(@Param('token') token: string) { return this.service.publicCardStatus(token); }
-  @Public() @Post('public/carnes/:token/consultar') @HttpCode(200) publicCardRead(@Param('token') token: string, @Body() body: PublicCardPinDto) { return this.service.publicCard(token, body.pin); }
+  @Public() @UseGuards(PublicCardRateLimitGuard) @Get('public/carnes/:token') publicCardStatus(@Param('token') token: string) { return this.service.publicCardStatus(token); }
+  @Public() @UseGuards(PublicCardRateLimitGuard) @Post('public/carnes/:token/consultar') @HttpCode(200) publicCardRead(@Param('token') token: string, @Body() body: PublicCardPinDto) { return this.service.publicCard(token, body.pin); }
   @Post('menores/:id/vacunacion') apply(@Param('id') id: string, @Body() b: AplicacionDto, @Req() r: { principal: SccviPrincipal }) { clinician(this.p(r)); return this.service.applyValidatedDose(id, b, this.p(r)); }
   @Get('menores/:id/mediciones') mediciones(@Param('id') id: string, @Query() q: PageDto, @Req() r: { principal: SccviPrincipal }) { return this.service.measurements(id, q, this.p(r)); }
+  @Get('menores/:id/crecimiento/curvas') growthCurves(@Param('id') id: string, @Req() r: { principal: SccviPrincipal }) { reader(this.p(r)); return this.service.growthCurves(id, this.p(r)); }
   @Post('menores/:id/mediciones') addMedicion(@Param('id') id: string, @Body() b: MedicionDto, @Req() r: { principal: SccviPrincipal }) { clinician(this.p(r)); return this.service.addMeasurement(id, b, this.p(r)); }
+  @Post('menores/:id/mediciones/:medicionId/correccion') correctMedicion(@Param('id') id: string, @Param('medicionId') medicionId: string, @Body() b: CorreccionMedicionDto, @Req() r: { principal: SccviPrincipal }) { clinician(this.p(r)); return this.service.correctMeasurement(id, medicionId, b, this.p(r)); }
   @Get('jornadas') jornadas(@Query() q: PageDto) { return this.service.listJornadas(q); }
   // Clinical teams plan and maintain campaigns; vaccine/scheme catalogues and
   // mass-notification dispatch remain restricted to administrators.
@@ -57,10 +62,13 @@ export class SccviController {
   @Patch('jornadas/:id') updateJornada(@Param('id') id: string, @Body() b: UpdateJornadaDto, @Req() r: { principal: SccviPrincipal }) { clinician(this.p(r)); return this.service.updateJornada(id, b, this.p(r)); }
   @Post('jornadas/:id/notificar') notifyJornada(@Param('id') id: string, @Body() b: JornadaNotificacionDto, @Req() r: { principal: SccviPrincipal }) { admin(this.p(r)); return this.service.notifyEligibleJornada(id, b, this.p(r)); }
   @Get('menores/:id/alertas') alerts(@Param('id') id: string, @Query() q: PageDto, @Req() r: { principal: SccviPrincipal }) { return this.service.alerts(id, q, this.p(r)); }
+  @Get('menores/:id/alertas-crecimiento') growthAlerts(@Param('id') id: string, @Req() r: { principal: SccviPrincipal }) { reader(this.p(r)); return this.service.growthAlerts(id, this.p(r)); }
   @Post('alertas/recalcular') recalculate(@Req() r: { principal: SccviPrincipal }) { clinician(this.p(r)); return this.service.recalculateAlerts(this.p(r)); }
   // Read-only operational reports are available to the clinical team; catalog
   // mutations and notification actions remain restricted to administrators.
   @Get('reportes/cobertura') coverage(@Req() r: { principal: SccviPrincipal }) { const principal = this.p(r); reader(principal); return this.service.coverage(principal); }
   @Get('reportes/aplicaciones-territorio') applicationAnalytics(@Req() r: { principal: SccviPrincipal }) { const principal = this.p(r); reader(principal); return this.service.applicationAnalytics(principal); }
+  @Get('reportes/crecimiento') growthReport(@Req() r: { principal: SccviPrincipal }) { const principal = this.p(r); reader(principal); return this.service.growthReport(principal); }
+  @Get('reportes/exportar') async exportReport(@Query('formato') format: string | undefined, @Req() r: { principal: SccviPrincipal }, @Res() response: Response) { const principal = this.p(r); reader(principal); const file = await this.exports.build(format, principal); response.setHeader('Content-Type', file.mime); response.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`); response.send(file.body); }
   @Get('reportes/pendientes') pending(@Query() q: PageDto, @Req() r: { principal: SccviPrincipal }) { const principal = this.p(r); reader(principal); return this.service.pendingReport(q, principal); }
 }
