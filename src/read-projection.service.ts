@@ -5,7 +5,7 @@ import { Client } from '@elastic/elasticsearch';
 import { Collection, MongoClient } from 'mongodb';
 import { In, Repository } from 'typeorm';
 import { AlertaVacunacion, EsquemaDosis, MedicionAntropometrica, Menor, MenorResponsable, RegistroVacunacion, Vacuna } from './entities';
-import { SsoClient } from './integrations';
+import { SsoClient, type SsoPerson } from './integrations';
 import { SsoServiceTokenService } from './sso-service-token.service';
 
 export type MinorReadDocument = {
@@ -55,10 +55,22 @@ export class SccviReadProjectionService implements OnModuleInit, OnModuleDestroy
   async rebuild(batchSize = 250) {
     if (!await this.connect()) return 0;
     let skip = 0; let total = 0;
-    for (;;) { const rows = await this.minors.find({ order: { id: 'ASC' }, skip, take: batchSize }); if (!rows.length) return total; await Promise.all(rows.map(minor => this.project(minor.id))); total += rows.length; if (rows.length < batchSize) return total; skip += rows.length; }
+    for (;;) {
+      const rows = await this.minors.find({ order: { id: 'ASC' }, skip, take: batchSize });
+      if (!rows.length) return total;
+      // Resolve the immutable identity projection once per SQL batch. The
+      // previous per-minor fan-out could overload the protected SSO directory
+      // during a large DEMO rebuild and trigger its rate limiter.
+      const people = await this.projectionPeople(rows.map(row => row.persona_id));
+      const peopleById = new Map(people.map(person => [person.persona_id, person]));
+      await Promise.all(rows.map(minor => this.project(minor.id, peopleById.get(minor.persona_id))));
+      total += rows.length;
+      if (rows.length < batchSize) return total;
+      skip += rows.length;
+    }
   }
 
-  async project(minorId: string): Promise<void> {
+  async project(minorId: string, resolvedPerson?: SsoPerson): Promise<void> {
     if (!await this.connect()) return;
     const minor = await this.minors.findOneBy({ id: minorId });
     if (!minor) { await this.collection?.deleteOne({ _id: minorId }); await this.elastic?.delete({ index: this.index, id: minorId }, { ignore: [404] }).catch(() => undefined); return; }
@@ -67,7 +79,7 @@ export class SccviReadProjectionService implements OnModuleInit, OnModuleDestroy
       this.vaccinations.find({ where: { menor_id: minorId }, order: { fecha_aplicacion: 'DESC' } }),
       this.measurements.find({ where: { menor_id: minorId }, order: { fecha: 'DESC' } }),
       this.alerts.find({ where: { menor_id: minorId }, order: { fecha_programada: 'ASC' } }),
-      this.projectionPeople([minor.persona_id]),
+      resolvedPerson ? Promise.resolve([resolvedPerson]) : this.projectionPeople([minor.persona_id]),
     ]);
     const doseIds = [...new Set([...applications.map(item => item.esquema_dosis_id), ...alerts.map(item => item.esquema_dosis_id)])];
     const doseRows = doseIds.length ? await this.doses.findBy({ id: In(doseIds) }) : [];
@@ -80,6 +92,15 @@ export class SccviReadProjectionService implements OnModuleInit, OnModuleDestroy
     await this.collection!.updateOne({ _id: minor.id }, { $set: document }, { upsert: true });
     const searchDocument = Object.fromEntries(Object.entries(document).filter(([key]) => key !== '_id'));
     await this.elastic!.index({ index: this.index, id: minor.id, document: searchDocument, refresh: false });
+  }
+
+  async projectMany(minorIds: string[]): Promise<void> {
+    const ids = [...new Set(minorIds)];
+    if (!ids.length || !await this.connect()) return;
+    const rows = await this.minors.findBy({ id: In(ids) });
+    const people = await this.projectionPeople(rows.map(row => row.persona_id));
+    const peopleById = new Map(people.map(person => [person.persona_id, person]));
+    await Promise.all(rows.map(row => this.project(row.id, peopleById.get(row.persona_id))));
   }
 
   async list(filters: Pick<MinorSearchFilters, 'departamento_codigo' | 'municipio_codigo' | 'page' | 'per_page'>) { return this.search(filters); }
@@ -107,7 +128,10 @@ export class SccviReadProjectionService implements OnModuleInit, OnModuleDestroy
 
   /** A missing technical credential must not prevent SQL clinical records from reaching the read model. */
   private async projectionPeople(personaIds: string[]) {
-    try { return await this.sso.resolvePeople(personaIds, await this.serviceTokens.get()); }
+    // SSO's resolver deliberately caps a request at 100 BIGINT identifiers.
+    const uniqueIds = [...new Set(personaIds)];
+    const chunks = Array.from({ length: Math.ceil(uniqueIds.length / 100) }, (_, index) => uniqueIds.slice(index * 100, index * 100 + 100));
+    try { const credential = await this.serviceTokens.get(); return (await Promise.all(chunks.map(chunk => this.sso.resolvePeople(chunk, credential)))).flat(); }
     catch { return []; }
   }
 

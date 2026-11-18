@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { OutboxNotificacion } from './entities';
 import { NotificationsClient } from './integrations';
 import { SsoServiceTokenService } from './sso-service-token.service';
@@ -12,7 +12,12 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
   constructor(@InjectRepository(OutboxNotificacion) private readonly outbox: Repository<OutboxNotificacion>, private readonly notifications: NotificationsClient, private readonly config: ConfigService, private readonly ssoToken: SsoServiceTokenService) {}
   onModuleInit() { this.timer = setInterval(() => void this.dispatchDue(), 30_000); this.timer.unref(); }
   onModuleDestroy() { if (this.timer) clearInterval(this.timer); }
-  async enqueue(personaId: string, menorId: string | null, finalidad: string, variables: Record<string, string>, key: string, mensaje?: { titulo: string; contenido: string }) { const exists = await this.outbox.exist({ where: { idempotency_key: key } }); if (!exists) await this.outbox.insert({ persona_id: personaId, menor_id: menorId, finalidad, idempotency_key: key, payload: JSON.stringify({ variables, mensaje }), estado: 'PENDIENTE', intentos: 0, procesado_at: null, ultimo_error: null, created_by_persona_id: null, updated_by_persona_id: null, version: 1 }); }
+  /** When clinical work supplies a manager, the durable notification is committed or rolled back with it. */
+  async enqueue(personaId: string, menorId: string | null, finalidad: string, variables: Record<string, string>, key: string, mensaje?: { titulo: string; contenido: string }, manager?: EntityManager) {
+    const repository = manager?.getRepository(OutboxNotificacion) ?? this.outbox;
+    const exists = await repository.exist({ where: { idempotency_key: key } });
+    if (!exists) await repository.insert({ persona_id: personaId, menor_id: menorId, finalidad, idempotency_key: key, payload: JSON.stringify({ variables, mensaje }), estado: 'PENDIENTE', intentos: 0, procesado_at: null, ultimo_error: null, created_by_persona_id: null, updated_by_persona_id: null, version: 1 });
+  }
   async dispatchDue() {
     const items = await this.outbox.find({ where: { estado: 'PENDIENTE' }, order: { id: 'ASC' }, take: 20 });
     if (!items.length) return;

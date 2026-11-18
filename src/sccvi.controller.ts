@@ -18,7 +18,7 @@ export class SccviController {
   constructor(private readonly service: SccviService, private readonly readProjection: SccviReadProjectionService, private readonly exports: ReportExportService) {}
   private p(req: { principal: SccviPrincipal }) { return req.principal; }
 
-  @Public() @Get('health') health() { return { status: 'ok' }; }
+  @Public() @Get('health') async health() { if (typeof this.service.clinicalReadiness !== 'function') return { status: 'ok' }; const clinical = await this.service.clinicalReadiness(); return { status: clinical.ready ? 'ok' : 'degraded', clinical_growth: clinical }; }
   @Get('sesion') session(@Req() r: { principal: SccviPrincipal }) { const p = this.p(r); return { user_id: p.userId, persona_id: p.personaId ?? null, scopes: p.scopes, roles: p.roles, permissions: p.permissions, territorio: p.territory ?? null, unidad: p.organizationUnit ?? null }; }
   @Get('personas/buscar') searchPeople(@Query() q: PersonaSearchDto, @Req() r: { principal: SccviPrincipal }) { const principal = this.p(r); reader(principal); return this.service.searchPeople(q, principal); }
   @Get('personas/:personaId/menores') dependents(@Param('personaId') personaId: string, @Req() r: { principal: SccviPrincipal }) { return this.service.dependentsForPerson(personaId, this.p(r)); }
@@ -52,7 +52,7 @@ export class SccviController {
   @Public() @UseGuards(PublicCardRateLimitGuard) @Post('public/carnes/:token/consultar') @HttpCode(200) publicCardRead(@Param('token') token: string, @Body() body: PublicCardPinDto) { return this.service.publicCard(token, body.pin); }
   @Post('menores/:id/vacunacion') apply(@Param('id') id: string, @Body() b: AplicacionDto, @Req() r: { principal: SccviPrincipal }) { clinician(this.p(r)); return this.service.applyValidatedDose(id, b, this.p(r)); }
   @Get('menores/:id/mediciones') mediciones(@Param('id') id: string, @Query() q: PageDto, @Req() r: { principal: SccviPrincipal }) { return this.service.measurements(id, q, this.p(r)); }
-  @Get('menores/:id/crecimiento/curvas') growthCurves(@Param('id') id: string, @Req() r: { principal: SccviPrincipal }) { reader(this.p(r)); return this.service.growthCurves(id, this.p(r)); }
+  @Get('menores/:id/crecimiento/curvas') growthCurves(@Param('id') id: string, @Query('sexo_curva_evaluacion') curveOverride: string | undefined, @Req() r: { principal: SccviPrincipal }) { return curveOverride ? this.service.growthCurves(id, this.p(r), curveOverride) : this.service.growthCurves(id, this.p(r)); }
   @Post('menores/:id/mediciones') addMedicion(@Param('id') id: string, @Body() b: MedicionDto, @Req() r: { principal: SccviPrincipal }) { clinician(this.p(r)); return this.service.addMeasurement(id, b, this.p(r)); }
   @Post('menores/:id/mediciones/:medicionId/correccion') correctMedicion(@Param('id') id: string, @Param('medicionId') medicionId: string, @Body() b: CorreccionMedicionDto, @Req() r: { principal: SccviPrincipal }) { clinician(this.p(r)); return this.service.correctMeasurement(id, medicionId, b, this.p(r)); }
   @Get('jornadas') jornadas(@Query() q: PageDto) { return this.service.listJornadas(q); }
@@ -62,7 +62,7 @@ export class SccviController {
   @Patch('jornadas/:id') updateJornada(@Param('id') id: string, @Body() b: UpdateJornadaDto, @Req() r: { principal: SccviPrincipal }) { clinician(this.p(r)); return this.service.updateJornada(id, b, this.p(r)); }
   @Post('jornadas/:id/notificar') notifyJornada(@Param('id') id: string, @Body() b: JornadaNotificacionDto, @Req() r: { principal: SccviPrincipal }) { admin(this.p(r)); return this.service.notifyEligibleJornada(id, b, this.p(r)); }
   @Get('menores/:id/alertas') alerts(@Param('id') id: string, @Query() q: PageDto, @Req() r: { principal: SccviPrincipal }) { return this.service.alerts(id, q, this.p(r)); }
-  @Get('menores/:id/alertas-crecimiento') growthAlerts(@Param('id') id: string, @Req() r: { principal: SccviPrincipal }) { reader(this.p(r)); return this.service.growthAlerts(id, this.p(r)); }
+  @Get('menores/:id/alertas-crecimiento') growthAlerts(@Param('id') id: string, @Req() r: { principal: SccviPrincipal }) { return this.service.growthAlerts(id, this.p(r)); }
   @Post('alertas/recalcular') recalculate(@Req() r: { principal: SccviPrincipal }) { clinician(this.p(r)); return this.service.recalculateAlerts(this.p(r)); }
   // Read-only operational reports are available to the clinical team; catalog
   // mutations and notification actions remain restricted to administrators.

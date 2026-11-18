@@ -1,6 +1,6 @@
 import { Injectable, ServiceUnavailableException, UnprocessableEntityException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { EntityManager, In, Repository } from 'typeorm';
 import { AlertaClinica, EstandarCrecimiento, EvaluacionCrecimiento, MedicionAntropometrica, MenorResponsable, ParametroCrecimiento } from './entities';
 import { correctedLengthCm, evaluateGrowth, GrowthCurveSex, GrowthIndicator, interpolatedLms } from './growth-calculator';
 import { OutboxService } from './outbox.service';
@@ -25,7 +25,12 @@ export class GrowthService {
     if (sex === 'MASCULINO' || sex === 'FEMENINO') return sex;
     throw new UnprocessableEntityException('La identidad de sexo no permite seleccionar una curva OMS; indique sexo_curva_evaluacion clínicamente documentado.');
   }
-  async ensureAvailable() { if (!await this.standards.exist({ where: { codigo: 'WHO-CGS-2006-0-5', estado: true } })) throw new ServiceUnavailableException('El estándar OMS de crecimiento no está cargado todavía.'); }
+  async readiness() {
+    const standard = await this.standards.findOne({ where: { codigo: 'WHO-CGS-2006-0-5', estado: true } });
+    const parameters = standard ? await this.parameters.count({ where: { estandar_id: standard.id } }) : 0;
+    return { ready: Boolean(standard && parameters === 13_546), expected_parameters: 13_546, parameters, standard: standard ? { codigo: standard.codigo, sha256_datos: standard.sha256_datos } : null };
+  }
+  async ensureAvailable() { const readiness = await this.readiness(); if (!readiness.ready) throw new ServiceUnavailableException(`El estándar OMS no está listo: ${readiness.parameters}/${readiness.expected_parameters} parámetros cargados.`); }
   /** Values are derived from the archived WHO LMS rows, never from a fitted prediction. */
   async weightForAgeCurves(person: PersonClinicalIdentity) {
     const standard = await this.standards.findOne({ where: { codigo: 'WHO-CGS-2006-0-5', estado: true } });
@@ -36,9 +41,31 @@ export class GrowthService {
     const valueAt = (l: number, m: number, s: number, z: number) => l === 0 ? m * Math.exp(s * z) : m * Math.pow(1 + l * s * z, 1 / l);
     return { estado: 'EVALUABLE' as const, indicador: 'PESO_EDAD', sexo_curva: person.sexo, estandar: { codigo: standard.codigo, version_fuente: standard.version_fuente, sha256_datos: standard.sha256_datos }, puntos: rows.map(row => { const l = Number(row.l); const m = Number(row.m); const s = Number(row.s); return { edad_dias: Number(row.x), ...Object.fromEntries(Object.entries(percentiles).map(([name, z]) => [name, Number(valueAt(l, m, s, z).toFixed(3))])) }; }) };
   }
-  async evaluate(measurement: MedicionAntropometrica, person: PersonClinicalIdentity, principal: Principal, curveOverride?: string) {
-    if (!person.fecha_nacimiento) throw new UnprocessableEntityException('SSO debe proporcionar fecha de nacimiento para evaluar crecimiento.');
+  /** Both charts required by SCCVI: weight-for-age and length/height-for-age. */
+  async curves(person: PersonClinicalIdentity, curveOverride?: string) {
     const standard = await this.standards.findOne({ where: { codigo: 'WHO-CGS-2006-0-5', estado: true } });
+    if (!standard) throw new ServiceUnavailableException('El estándar OMS de crecimiento no está cargado todavía.');
+    const sex = this.curveSex(person, curveOverride);
+    const percentileZ: Record<string, number> = { p3: -1.8807936081512509, p5: -1.6448536269514729, p50: 0, p85: 1.0364333894937896, p95: 1.6448536269514722, p97: 1.8807936081512509 };
+    const valueAt = (l: number, m: number, s: number, z: number) => l === 0 ? m * Math.exp(s * z) : m * Math.pow(1 + l * s * z, 1 / l);
+    const makeCurve = async (indicador: 'PESO_EDAD' | 'LONGITUD_TALLA_EDAD') => {
+      const rows = await this.parameters.find({ where: { estandar_id: standard.id, indicador, sexo_curva: sex }, order: { x: 'ASC' } });
+      return { indicador, puntos: rows.map(row => {
+        const l = Number(row.l); const m = Number(row.m); const s = Number(row.s);
+        return { edad_dias: Number(row.x), ...Object.fromEntries(Object.entries(percentileZ).map(([name, z]) => [name, Number(valueAt(l, m, s, z).toFixed(3))])) };
+      }) };
+    };
+    return { estado: 'EVALUABLE' as const, sexo_curva: sex, estandar: { codigo: standard.codigo, version_fuente: standard.version_fuente, sha256_datos: standard.sha256_datos }, curvas: [await makeCurve('PESO_EDAD'), await makeCurve('LONGITUD_TALLA_EDAD')] };
+  }
+  async evaluate(measurement: MedicionAntropometrica, person: PersonClinicalIdentity, principal: Principal, curveOverride?: string, manager?: EntityManager) {
+    if (!person.fecha_nacimiento) throw new UnprocessableEntityException('SSO debe proporcionar fecha de nacimiento para evaluar crecimiento.');
+    if (measurement.tipo_medicion !== 'LONGITUD' && measurement.tipo_medicion !== 'TALLA') throw new UnprocessableEntityException('La medición pendiente debe clasificarse clínicamente como LONGITUD o TALLA antes de evaluarse.');
+    const standards = manager?.getRepository(EstandarCrecimiento) ?? this.standards;
+    const parameters = manager?.getRepository(ParametroCrecimiento) ?? this.parameters;
+    const evaluations = manager?.getRepository(EvaluacionCrecimiento) ?? this.evaluations;
+    const alerts = manager?.getRepository(AlertaClinica) ?? this.alerts;
+    const responsables = manager?.getRepository(MenorResponsable) ?? this.responsables;
+    const standard = await standards.findOne({ where: { codigo: 'WHO-CGS-2006-0-5', estado: true } });
     if (!standard) throw new ServiceUnavailableException('El estándar OMS de crecimiento no está cargado todavía.');
     const ageDays = this.ageDays(person.fecha_nacimiento, measurement.fecha);
     if (ageDays < standard.edad_minima_dias || ageDays > standard.edad_maxima_dias) throw new UnprocessableEntityException(`La edad exacta (${ageDays} días) está fuera del estándar OMS configurado.`);
@@ -51,24 +78,26 @@ export class GrowthService {
     ];
     const saved: EvaluacionCrecimiento[] = [];
     for (const candidate of values) {
-      const parameterRows = await this.parameters.find({ where: { estandar_id: standard.id, indicador: candidate.indicator, sexo_curva: sex }, order: { x: 'ASC' } });
+      const parameterRows = await parameters.find({ where: { estandar_id: standard.id, indicador: candidate.indicator, sexo_curva: sex }, order: { x: 'ASC' } });
       const lms = interpolatedLms(parameterRows.map(row => ({ x: Number(row.x), l: Number(row.l), m: Number(row.m), s: Number(row.s) })), candidate.x);
       const result = lms ? evaluateGrowth(candidate.indicator, candidate.value, lms) : { z: Number.NaN, percentile: null, classification: 'NO_EVALUABLE', state: 'IMPLAUSIBLE' as const, detail: `No hay parámetro OMS para ${candidate.indicator} en x=${candidate.x.toFixed(2)}.` };
-      const evaluation = await this.evaluations.save(this.evaluations.create({
+      const evaluation = await evaluations.save(evaluations.create({
         medicion_id: measurement.id, estandar_id: standard.id, indicador: candidate.indicator, sexo_curva: sex, edad_dias: ageDays, tipo_medicion: measurement.tipo_medicion,
         valor_entrada: candidate.value.toFixed(2), x_referencia: candidate.x.toFixed(2), l: lms?.l.toFixed(8) ?? null, m: lms?.m.toFixed(8) ?? null, s: lms?.s.toFixed(8) ?? null,
         puntuacion_z: Number.isFinite(result.z) ? result.z.toFixed(4) : null, percentil: result.percentile === null ? null : result.percentile.toFixed(4), clasificacion: result.classification, estado: result.state, detalle: result.detail,
         created_by_persona_id: principal.personaId ?? null, updated_by_persona_id: principal.personaId ?? null,
       }));
       saved.push(evaluation);
+      const conditionTypes = [`CRECIMIENTO_BAJO_P5_${candidate.indicator}`, `CRECIMIENTO_ALTO_P95_${candidate.indicator}`];
+      const activeConditions = (await alerts.find({ where: { menor_id: measurement.menor_id, estado: 'PENDIENTE' } })) ?? [];
+      for (const active of activeConditions.filter(item => conditionTypes.includes(item.tipo))) {
+        active.estado = 'RESUELTA'; active.updated_by_persona_id = principal.personaId ?? null; await alerts.save(active);
+      }
       if (result.state === 'EVALUABLE' && result.classification !== 'ADECUADO') {
         const tipo = result.classification === 'BAJO_P5' ? `CRECIMIENTO_BAJO_P5_${candidate.indicator}` : `CRECIMIENTO_ALTO_P95_${candidate.indicator}`;
-        const exists = await this.alerts.exist({ where: { menor_id: measurement.menor_id, medicion_id: measurement.id, tipo } });
-        if (!exists) {
-          const alert = await this.alerts.save(this.alerts.create({ menor_id: measurement.menor_id, medicion_id: measurement.id, tipo, severidad: result.classification === 'BAJO_P5' ? 'ALTA' : 'MEDIA', estado: 'PENDIENTE', notificado_at: null, detalle: `${candidate.indicator}: Z=${result.z.toFixed(2)}${result.percentile === null ? '' : `, P=${result.percentile.toFixed(1)}`}.`, created_by_persona_id: principal.personaId ?? null, updated_by_persona_id: principal.personaId ?? null }));
-          const recipients = await this.responsables.find({ where: { menor_id: measurement.menor_id, estado: true }, select: { persona_id: true } });
-          await Promise.all([...new Set(recipients.map(item => item.persona_id))].map(personaId => this.outbox.enqueue(personaId, measurement.menor_id, 'SCCVI_ALERTA_CRECIMIENTO', { alerta_id: alert.id, menor_id: measurement.menor_id, indicador: candidate.indicator, clasificacion: result.classification }, `crecimiento:${alert.id}:persona:${personaId}`, { titulo: 'Alerta de crecimiento', contenido: 'Existe una alerta de crecimiento que requiere seguimiento por el equipo de salud.' })));
-        }
+        const alert = await alerts.save(alerts.create({ menor_id: measurement.menor_id, medicion_id: measurement.id, tipo, severidad: result.classification === 'BAJO_P5' ? 'ALTA' : 'MEDIA', estado: 'PENDIENTE', notificado_at: null, detalle: `${candidate.indicator}: Z=${result.z.toFixed(2)}${result.percentile === null ? '' : `, P=${result.percentile.toFixed(1)}`}.`, created_by_persona_id: principal.personaId ?? null, updated_by_persona_id: principal.personaId ?? null }));
+        const recipients = await responsables.find({ where: { menor_id: measurement.menor_id, estado: true }, select: { persona_id: true } });
+        await Promise.all([...new Set(recipients.map(item => item.persona_id))].map(personaId => manager ? this.outbox.enqueue(personaId, measurement.menor_id, 'SCCVI_ALERTA_CRECIMIENTO', { alerta_id: alert.id, menor_id: measurement.menor_id, indicador: candidate.indicator, clasificacion: result.classification }, `crecimiento:${alert.id}:persona:${personaId}`, { titulo: 'Alerta de crecimiento', contenido: 'Existe una alerta de crecimiento que requiere seguimiento por el equipo de salud.' }, manager) : this.outbox.enqueue(personaId, measurement.menor_id, 'SCCVI_ALERTA_CRECIMIENTO', { alerta_id: alert.id, menor_id: measurement.menor_id, indicador: candidate.indicator, clasificacion: result.classification }, `crecimiento:${alert.id}:persona:${personaId}`, { titulo: 'Alerta de crecimiento', contenido: 'Existe una alerta de crecimiento que requiere seguimiento por el equipo de salud.' })));
       }
     }
     return { standard: { codigo: standard.codigo, sha256_datos: standard.sha256_datos }, edad_dias: ageDays, talla_corregida_cm: correctedHeight, evaluaciones: saved };
@@ -76,9 +105,10 @@ export class GrowthService {
 
   async forMeasurement(measurementId: string) { return this.evaluations.find({ where: { medicion_id: measurementId }, order: { id: 'ASC' } }); }
   async alertsForMinor(menorId: string) { return this.alerts.find({ where: { menor_id: menorId }, order: { id: 'DESC' } }); }
-  async resolveAlertsForSupersededMeasurement(measurementId: string, principal: Principal) {
-    const alerts = await this.alerts.find({ where: { medicion_id: measurementId, estado: 'PENDIENTE' } });
-    for (const alert of alerts) { alert.estado = 'RESUELTA'; alert.updated_by_persona_id = principal.personaId ?? null; await this.alerts.save(alert); }
+  async resolveAlertsForSupersededMeasurement(measurementId: string, principal: Principal, manager?: EntityManager) {
+    const alertsRepository = manager?.getRepository(AlertaClinica) ?? this.alerts;
+    const alerts = await alertsRepository.find({ where: { medicion_id: measurementId, estado: 'PENDIENTE' } });
+    for (const alert of alerts) { alert.estado = 'RESUELTA'; alert.updated_by_persona_id = principal.personaId ?? null; await alertsRepository.save(alert); }
     return alerts.length;
   }
   async reportingMetadata() {
@@ -114,10 +144,15 @@ export class GrowthService {
   }
   async reportForMinors(minorIds: string[]) {
     if (!minorIds.length) return { evaluaciones: 0, bajo_p5: 0, alto_p95: 0, no_evaluables: 0, promedio_z_por_indicador: {}, alertas: [] as AlertaClinica[] };
-    const measurementIds = (await this.measurements.find({ where: { menor_id: In(minorIds) }, select: { id: true } })).map(item => item.id);
+    const measurements = await this.measurements.find({ where: { menor_id: In(minorIds), estado: 'VIGENTE', tipo_medicion: In(['LONGITUD', 'TALLA']) }, order: { fecha: 'DESC', id: 'DESC' } });
+    const latestByMinor = new Map<string, MedicionAntropometrica>();
+    for (const measurement of measurements) if (!latestByMinor.has(measurement.menor_id)) latestByMinor.set(measurement.menor_id, measurement);
+    const measurementIds = [...latestByMinor.values()].map(item => item.id);
     const [evaluations, alerts] = await Promise.all([measurementIds.length ? this.evaluations.find({ where: { medicion_id: In(measurementIds) } }) : Promise.resolve([] as EvaluacionCrecimiento[]), this.alerts.find({ where: { menor_id: In(minorIds), estado: 'PENDIENTE' }, order: { id: 'DESC' } })]);
     const evaluable = evaluations.filter(item => item.estado === 'EVALUABLE'); const averages = new Map<string, { sum: number; count: number }>();
     for (const item of evaluable) if (item.puntuacion_z !== null) { const value = averages.get(item.indicador) ?? { sum: 0, count: 0 }; value.sum += Number(item.puntuacion_z); value.count += 1; averages.set(item.indicador, value); }
-    return { evaluaciones: evaluations.length, bajo_p5: evaluable.filter(item => item.clasificacion === 'BAJO_P5').length, alto_p95: evaluable.filter(item => item.clasificacion === 'ALTO_P95').length, no_evaluables: evaluations.filter(item => item.estado !== 'EVALUABLE').length, promedio_z_por_indicador: Object.fromEntries([...averages.entries()].map(([indicator, value]) => [indicator, Number((value.sum / value.count).toFixed(4))])), alertas: alerts };
+    const lowChildren = new Set(evaluable.filter(item => item.clasificacion === 'BAJO_P5').map(item => measurements.find(measurement => measurement.id === item.medicion_id)?.menor_id).filter(Boolean));
+    const highChildren = new Set(evaluable.filter(item => item.clasificacion === 'ALTO_P95').map(item => measurements.find(measurement => measurement.id === item.medicion_id)?.menor_id).filter(Boolean));
+    return { evaluaciones: evaluations.length, ninos_evaluados: latestByMinor.size, bajo_p5: lowChildren.size, alto_p95: highChildren.size, no_evaluables: evaluations.filter(item => item.estado !== 'EVALUABLE').length, promedio_z_por_indicador: Object.fromEntries([...averages.entries()].map(([indicator, value]) => [indicator, Number((value.sum / value.count).toFixed(4))])), alertas: alerts };
   }
 }

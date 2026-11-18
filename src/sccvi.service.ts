@@ -1,9 +1,9 @@
 import { BadGatewayException, ConflictException, HttpException, HttpStatus, Injectable, NotFoundException, ServiceUnavailableException, UnauthorizedException, UnprocessableEntityException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { InjectRepository } from '@nestjs/typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomBytes, randomInt } from 'node:crypto';
 import * as argon2 from 'argon2';
-import { In, ObjectLiteral, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, ObjectLiteral, Repository } from 'typeorm';
 import { AlertaVacunacion, AuditoriaSccvi, CarnePublico, EsquemaDosis, EsquemaVacunacion, JornadaVacunacion, JornadaVacuna, MedicionAntropometrica, Menor, MenorResponsable, RegistroVacunacion, Vacuna } from './entities';
 import { AplicacionDto, ContactoRegistroDto, CorreccionMedicionDto, DosisDto, EsquemaDto, FamiliaRegistroDto, FamiliaResponsableDto, JornadaDto, JornadaNotificacionDto, MedicionDto, MenorDto, MenorQueryDto, PageDto, PersonaSearchDto, ResponsableDto, UpdateEsquemaDto, UpdateJornadaDto, UpdateMenorDto, UpdateResponsableDto, UpdateVacunaDto, VacunaDto } from './dto';
 import { GeoClient, SsoClient, type SsoCredential } from './integrations';
@@ -30,7 +30,7 @@ export class SccviService {
     @InjectRepository(JornadaVacuna) private readonly jornadaVacunas: Repository<JornadaVacuna>,
     @InjectRepository(AlertaVacunacion) private readonly alertas: Repository<AlertaVacunacion>,
     @InjectRepository(AuditoriaSccvi) private readonly auditoria: Repository<AuditoriaSccvi>,
-    private readonly sso: SsoClient, private readonly geo: GeoClient, private readonly outbox: OutboxService, private readonly config: ConfigService, private readonly readProjection: SccviReadProjectionService, private readonly projectionOutbox: ProjectionOutboxService, private readonly serviceTokens: SsoServiceTokenService, private readonly growth: GrowthService, @InjectRepository(CarnePublico) private readonly carnesPublicos: Repository<CarnePublico> = {} as Repository<CarnePublico>,
+    private readonly sso: SsoClient, private readonly geo: GeoClient, private readonly outbox: OutboxService, private readonly config: ConfigService, private readonly readProjection: SccviReadProjectionService, private readonly projectionOutbox: ProjectionOutboxService, private readonly serviceTokens: SsoServiceTokenService, private readonly growth: GrowthService, @InjectRepository(CarnePublico) private readonly carnesPublicos: Repository<CarnePublico> = {} as Repository<CarnePublico>, @InjectDataSource() private readonly dataSource?: DataSource,
   ) {}
 
   private async page<T extends ObjectLiteral>(repo: Repository<T>, page: PageDto, where?: object): Promise<Page<T>> {
@@ -89,6 +89,14 @@ export class SccviService {
   private serviceToken() { return this.serviceTokens.get(); }
   /** Prefer the authenticated SSO session for request-bound directory access. */
   private async ssoCredential(principal?: SccviPrincipal): Promise<SsoCredential> { return principal?.ssoSessionCookie ? { cookie: principal.ssoSessionCookie } : this.serviceToken(); }
+  /** SSO deliberately caps resolver requests at 100 decimal BIGINT ids. Reports
+   * and campaigns still consume every authorized record by chunking upstream,
+   * never by trimming the SQL result set. */
+  private async resolvePeople(personaIds: string[], credential: SsoCredential) {
+    const uniqueIds = [...new Set(personaIds)];
+    const chunks = Array.from({ length: Math.ceil(uniqueIds.length / 100) }, (_, index) => uniqueIds.slice(index * 100, index * 100 + 100));
+    return (await Promise.all(chunks.map(chunk => this.sso.resolvePeople(chunk, credential)))).flat();
+  }
   private dateAtNoon(value: string) { return new Date(`${value}T12:00:00Z`); }
   private ageInDays(birthday: string, date: string) { return Math.floor((this.dateAtNoon(date).getTime() - this.dateAtNoon(birthday).getTime()) / 86_400_000); }
   /** Historic catalog versions must never create new cards or alert schedules. */
@@ -135,7 +143,7 @@ export class SccviService {
     const minors = await this.menores.find({ where: { id: In(ids), estado: true }, order: { id: 'ASC' } });
     if (!minors.length) return [];
     const [people, applications, measurements] = await Promise.all([
-      this.sso.resolvePeople(minors.map(item => item.persona_id), await this.ssoCredential(principal)),
+      this.resolvePeople(minors.map(item => item.persona_id), await this.ssoCredential(principal)),
       this.registros.find({ where: { menor_id: In(minors.map(item => item.id)), estado: 'VALIDA' }, order: { fecha_aplicacion: 'DESC' } }),
       this.mediciones.find({ where: { menor_id: In(minors.map(item => item.id)) }, order: { fecha: 'DESC' } }),
     ]);
@@ -279,10 +287,12 @@ export class SccviService {
       }
     }
     const actorTerritory = await this.territoryFor(principal);
+    // The clinical session is authoritative for the place of care. A browser
+    // must never be able to override the unit's assigned territory.
     const location = {
-      departamento_codigo: input.departamento_codigo ?? actorTerritory.departamento_codigo ?? minor.departamento_codigo ?? undefined,
-      municipio_codigo: input.municipio_codigo ?? actorTerritory.municipio_codigo ?? minor.municipio_codigo ?? undefined,
-      comunidad_ref: input.comunidad_ref ?? minor.comunidad_ref ?? undefined,
+      departamento_codigo: actorTerritory.departamento_codigo ?? minor.departamento_codigo ?? undefined,
+      municipio_codigo: actorTerritory.municipio_codigo ?? minor.municipio_codigo ?? undefined,
+      comunidad_ref: minor.comunidad_ref ?? undefined,
     };
     if (!location.departamento_codigo || !location.municipio_codigo) throw new UnprocessableEntityException('Indica el lugar donde se aplicó la vacuna.');
     await this.validateLocation(location);
@@ -328,14 +338,24 @@ export class SccviService {
     if (card.bloqueado_hasta && card.bloqueado_hasta.getTime() > now.getTime()) throw new HttpException('Demasiados intentos. Intenta nuevamente más tarde.', HttpStatus.TOO_MANY_REQUESTS);
     if (card.bloqueado_hasta) { card.bloqueado_hasta = null; card.intentos_fallidos = 0; }
     if (!await argon2.verify(card.pin_hash, pin)) {
-      card.intentos_fallidos += 1;
-      if (card.intentos_fallidos >= 5) { card.bloqueado_hasta = new Date(now.getTime() + 15 * 60_000); card.intentos_fallidos = 0; }
-      await this.carnesPublicos.save(card);
+      const queryBuilder = this.carnesPublicos.createQueryBuilder?.();
+      if (!queryBuilder?.update) {
+        card.intentos_fallidos += 1;
+        if (card.intentos_fallidos >= 5) { card.bloqueado_hasta = new Date(now.getTime() + 15 * 60_000); card.intentos_fallidos = 0; }
+        await this.carnesPublicos.save(card);
+        throw new UnauthorizedException('PIN incorrecto.');
+      }
+      const blockedUntil = new Date(now.getTime() + 15 * 60_000).toISOString();
+      const result = await queryBuilder.update(CarnePublico).set({
+        intentos_fallidos: () => "CASE WHEN intentos_fallidos + 1 >= 5 THEN 0 ELSE intentos_fallidos + 1 END",
+        bloqueado_hasta: () => `CASE WHEN intentos_fallidos + 1 >= 5 THEN CONVERT(datetime2, '${blockedUntil}', 127) ELSE bloqueado_hasta END`,
+      }).where('id = :id AND estado = 1 AND (bloqueado_hasta IS NULL OR bloqueado_hasta <= SYSUTCDATETIME())', { id: card.id }).execute();
+      if (!result.affected) throw new HttpException('Demasiados intentos. Intenta nuevamente más tarde.', HttpStatus.TOO_MANY_REQUESTS);
       throw new UnauthorizedException('PIN incorrecto.');
     }
     card.intentos_fallidos = 0; card.bloqueado_hasta = null; card.ultimo_acceso_at = now; await this.carnesPublicos.save(card);
     const raw = await this.vaccinationCard(card.menor_id, { userId: '0', roles: ['SCCVI_ADMIN'], scopes: ['sccvi.admin'], permissions: [], payload: { sub: '0' } });
-    const minor = await this.minor(card.menor_id); const [person] = await this.sso.resolvePeople([minor.persona_id], await this.serviceToken()); const latest = await this.mediciones.findOne({ where: { menor_id: card.menor_id }, order: { fecha: 'DESC' } });
+    const minor = await this.minor(card.menor_id); const [person] = await this.sso.resolvePeople([minor.persona_id], await this.serviceToken()); const latest = await this.mediciones.findOne({ where: { menor_id: card.menor_id, estado: 'VIGENTE', tipo_medicion: In(['LONGITUD', 'TALLA']) }, order: { fecha: 'DESC', id: 'DESC' } });
     await this.auditoria.insert({ accion: 'READ_PUBLIC', recurso: 'carne_publico', recurso_id: card.id, actor_persona_id: null, detalle: null });
     return { menor: { nombre: person?.ncompleto ?? 'Menor' }, esquema: raw.esquema, emitido_en: now.toISOString(), ultimo_control: latest ? { fecha: latest.fecha, peso_kg: latest.peso_kg, talla_cm: latest.talla_cm, imc: latest.imc } : null, dosis: raw.dosis.map(dose => ({ vacuna_codigo: dose.vacuna_codigo, vacuna_nombre: dose.vacuna_nombre, orden: dose.orden, fecha_programada: dose.fecha_programada, fecha_aplicacion: dose.fecha_aplicacion, estado: dose.estado })) };
   }
@@ -353,9 +373,9 @@ export class SccviService {
     const result = await this.page(this.mediciones, page, { menor_id: menorId });
     return { ...result, items: await Promise.all(result.items.map(async measurement => ({ ...measurement, evaluaciones: await this.growth.forMeasurement(measurement.id) }))) };
   }
-  async growthCurves(menorId: string, principal: SccviPrincipal) { const minor = await this.minor(menorId); await this.assertAccess(menorId, principal); return this.growth.weightForAgeCurves(await this.requirePerson(minor.persona_id, principal)); }
+  async growthCurves(menorId: string, principal: SccviPrincipal, curveOverride?: string) { const minor = await this.minor(menorId); await this.assertAccess(menorId, principal); return this.growth.curves(await this.requirePerson(minor.persona_id, principal), curveOverride); }
   async growthAlerts(menorId: string, principal: SccviPrincipal) { await this.minor(menorId); await this.assertAccess(menorId, principal); return this.growth.alertsForMinor(menorId); }
-  private async saveMeasurement(menorId: string, input: MedicionDto, p: SccviPrincipal, correction?: { corrige_medicion_id: string; motivo_correccion: string }) {
+  private async persistMeasurement(menorId: string, input: MedicionDto, p: SccviPrincipal, correction?: { corrige_medicion_id: string; motivo_correccion: string }, manager?: EntityManager) {
     const minor = await this.minor(menorId); const today = new Date().toISOString().slice(0, 10);
     if (input.fecha > today) throw new UnprocessableEntityException('La fecha de medición no puede estar en el futuro.');
     const person = await this.requirePerson(minor.persona_id, p);
@@ -363,12 +383,39 @@ export class SccviService {
     await this.growth.ensureAvailable();
     const imc = (input.peso_kg / ((input.talla_cm / 100) ** 2)).toFixed(2);
     try {
-      const saved = await this.mediciones.save(this.mediciones.create({ menor_id: menorId, fecha: input.fecha, peso_kg: input.peso_kg.toFixed(2), talla_cm: input.talla_cm.toFixed(2), imc, tipo_medicion: input.tipo_medicion, estado: 'VIGENTE', corrige_medicion_id: correction?.corrige_medicion_id ?? null, motivo_correccion: correction?.motivo_correccion ?? null, observaciones: input.observaciones ?? null, created_by_persona_id: p.personaId ?? null, updated_by_persona_id: p.personaId ?? null }));
-      const evaluation = await this.growth.evaluate(saved, person, p, input.sexo_curva_evaluacion); await this.audit(p, correction ? 'CORRECT' : 'CREATE', 'medicion_antropometrica', saved.id, correction); this.projectLater(menorId); return { ...saved, crecimiento: evaluation };
+      const measurements = manager?.getRepository(MedicionAntropometrica) ?? this.mediciones;
+      const saved = await measurements.save(measurements.create({ menor_id: menorId, fecha: input.fecha, peso_kg: input.peso_kg.toFixed(2), talla_cm: input.talla_cm.toFixed(2), imc, tipo_medicion: input.tipo_medicion, estado: 'VIGENTE', corrige_medicion_id: correction?.corrige_medicion_id ?? null, motivo_correccion: correction?.motivo_correccion ?? null, observaciones: input.observaciones ?? null, created_by_persona_id: p.personaId ?? null, updated_by_persona_id: p.personaId ?? null }));
+      const evaluation = await this.growth.evaluate(saved, person, p, input.sexo_curva_evaluacion, manager);
+      const detail = correction ?? undefined;
+      if (manager) await manager.getRepository(AuditoriaSccvi).insert({ accion: correction ? 'CORRECT' : 'CREATE', recurso: 'medicion_antropometrica', recurso_id: saved.id, actor_persona_id: p.personaId ?? null, detalle: detail ? JSON.stringify(detail) : null });
+      else await this.audit(p, correction ? 'CORRECT' : 'CREATE', 'medicion_antropometrica', saved.id, detail);
+      return { ...saved, crecimiento: evaluation };
     } catch (error) { if (error instanceof UnprocessableEntityException || error instanceof BadGatewayException || error instanceof ServiceUnavailableException) throw error; throw new ConflictException('Ya existe una medición vigente para ese menor y fecha.'); }
+  }
+  private async saveMeasurement(menorId: string, input: MedicionDto, p: SccviPrincipal, correction?: { corrige_medicion_id: string; motivo_correccion: string }) {
+    const result = this.dataSource
+      ? await this.dataSource.transaction(manager => this.persistMeasurement(menorId, input, p, correction, manager))
+      : await this.persistMeasurement(menorId, input, p, correction);
+    this.projectLater(menorId);
+    return result;
   }
   async addMeasurement(menorId: string, input: MedicionDto, p: SccviPrincipal) { return this.saveMeasurement(menorId, input, p); }
   async correctMeasurement(menorId: string, measurementId: string, input: CorreccionMedicionDto, p: SccviPrincipal) {
+    if (this.dataSource) {
+      const created = await this.dataSource.transaction(async manager => {
+        const measurements = manager.getRepository(MedicionAntropometrica);
+        const prior = await measurements.findOne({ where: { id: measurementId, menor_id: menorId, estado: 'VIGENTE' }, lock: { mode: 'pessimistic_write' } });
+        if (!prior) throw new NotFoundException('Medición vigente no encontrada.');
+        if (prior.fecha !== input.fecha) throw new UnprocessableEntityException('La corrección debe conservar la fecha clínica de la medición original.');
+        await measurements.update(prior.id, { estado: 'CORREGIDA', updated_by_persona_id: p.personaId ?? null });
+        const saved = await this.persistMeasurement(menorId, input, p, { corrige_medicion_id: prior.id, motivo_correccion: input.motivo_correccion }, manager);
+        await this.growth.resolveAlertsForSupersededMeasurement(prior.id, p, manager);
+        await manager.getRepository(AuditoriaSccvi).insert({ accion: 'SUPERSEDE', recurso: 'medicion_antropometrica', recurso_id: prior.id, actor_persona_id: p.personaId ?? null, detalle: JSON.stringify({ reemplazada_por: saved.id, motivo: input.motivo_correccion }) });
+        return saved;
+      });
+      this.projectLater(menorId);
+      return created;
+    }
     const prior = await this.mediciones.findOneBy({ id: measurementId, menor_id: menorId, estado: 'VIGENTE' }); if (!prior) throw new NotFoundException('Medición vigente no encontrada.');
     if (prior.fecha !== input.fecha) throw new UnprocessableEntityException('La corrección debe conservar la fecha clínica de la medición original.');
     await this.mediciones.update(prior.id, { estado: 'CORREGIDA', updated_by_persona_id: p.personaId ?? null });
@@ -391,7 +438,7 @@ export class SccviService {
       : await (async () => {
         const relations = minorIds.length ? await this.responsables.find({ where: { estado: true, menor_id: In(minorIds) } }) : [];
         const candidateIds = [...new Set(relations.map(relation => relation.persona_id))];
-        const people = candidateIds.length ? await this.sso.resolvePeople(candidateIds, token) : [];
+        const people = candidateIds.length ? await this.resolvePeople(candidateIds, token) : [];
         return people.filter(person => (!jornada.departamento_codigo || person.departamento_codigo === jornada.departamento_codigo) && (!jornada.municipio_codigo || person.municipio_codigo === jornada.municipio_codigo) && (!jornada.comunidad_ref || person.comunidad_ref === jornada.comunidad_ref));
       })();
     const recipients = [...new Set(residents.map(person => person.persona_id))];
@@ -412,7 +459,7 @@ export class SccviService {
     const doseIds = new Set(doseRows.map(item => item.id));
     if (input.edad_maxima_meses !== undefined && input.edad_minima_meses !== undefined && input.edad_maxima_meses < input.edad_minima_meses) throw new UnprocessableEntityException('La edad máxima no puede ser menor a la edad mínima.');
     const territorial = await this.menores.find({ where: { estado: true, ...(jornada.departamento_codigo ? { departamento_codigo: jornada.departamento_codigo } : {}), ...(jornada.municipio_codigo ? { municipio_codigo: jornada.municipio_codigo } : {}), ...(jornada.comunidad_ref ? { comunidad_ref: jornada.comunidad_ref } : {}) } });
-    const people = territorial.length ? await this.sso.resolvePeople(territorial.map(minor => minor.persona_id), await this.serviceToken()) : [];
+    const people = territorial.length ? await this.resolvePeople(territorial.map(minor => minor.persona_id), await this.serviceToken()) : [];
     const birthdays = new Map(people.filter(person => /^\d{4}-\d{2}-\d{2}$/.test(person.fecha_nacimiento ?? '')).map(person => [person.persona_id, person.fecha_nacimiento!]));
     const dated = territorial.filter(minor => {
       if (input.edad_minima_meses === undefined && input.edad_maxima_meses === undefined) return true;
@@ -488,7 +535,7 @@ export class SccviService {
   async recalculateAlerts(p: SccviPrincipal) {
     const schema = await this.currentVaccinationSchema();
     const [doses, minors] = await Promise.all([this.dosis.find({ where: { estado: true, esquema_id: schema.id }, order: { id: 'ASC' } }), this.menores.find({ where: { estado: true }, order: { id: 'ASC' } })]);
-    const persons = await this.sso.resolvePeople(minors.map(minor => minor.persona_id), await this.serviceToken());
+    const persons = await this.resolvePeople(minors.map(minor => minor.persona_id), await this.serviceToken());
     const birthdays = new Map(persons.filter(person => /^\d{4}-\d{2}-\d{2}$/.test(person.fecha_nacimiento ?? '')).map(person => [person.persona_id, person.fecha_nacimiento!]));
     if (birthdays.size !== minors.length) throw new BadGatewayException('SSO no devolvió fecha de nacimiento para todos los menores activos.');
     const today = new Date(); const todayUtc = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()); let count = 0;
@@ -519,7 +566,7 @@ export class SccviService {
     const schema = await this.currentVaccinationSchema(); const today = new Date().toISOString().slice(0, 10);
     const [currentDoses, people, applications] = await Promise.all([
       this.dosis.find({ where: { esquema_id: schema.id, estado: true }, order: { id: 'ASC' } }),
-      this.sso.resolvePeople(minors.map(minor => minor.persona_id), await this.serviceToken()),
+      this.resolvePeople(minors.map(minor => minor.persona_id), await this.serviceToken()),
       this.registros.find({ where: { menor_id: In(minors.map(minor => minor.id)), estado: 'VALIDA' } }),
     ]);
     const birthdays = new Map(people.filter(person => /^\d{4}-\d{2}-\d{2}$/.test(person.fecha_nacimiento ?? '')).map(person => [person.persona_id, person.fecha_nacimiento!]));
@@ -538,11 +585,22 @@ export class SccviService {
   }
   async growthReport(principal: SccviPrincipal) { const territory = await this.territoryFor(principal); const minorIds = (await this.menores.find({ where: { estado: true, ...territory }, select: { id: true } })).map(item => item.id); return this.growth.reportForMinors(minorIds); }
   async growthReportMetadata() { return this.growth.reportingMetadata(); }
+  async clinicalReadiness() { return this.growth.readiness(); }
   async pendingReport(page: PageDto, principal: SccviPrincipal) {
     const territory = await this.territoryFor(principal);
     if (!territory.departamento_codigo && !territory.municipio_codigo) return this.alertPage(page, { estado: 'PENDIENTE' });
     const minorIds = (await this.menores.find({ where: { estado: true, ...territory }, select: { id: true } })).map(minor => minor.id);
     if (!minorIds.length) return { items: [], meta: { current_page: page.page, per_page: page.per_page, total: 0, last_page: 1 } };
     return this.alertPage(page, { estado: 'PENDIENTE', menor_id: In(minorIds) });
+  }
+  /** Exporters must consume every authorized page, never just an arbitrary first 100 rows. */
+  async pendingReportAll(principal: SccviPrincipal) {
+    const items: Awaited<ReturnType<SccviService['pendingReport']>>['items'] = [];
+    let current = 1; let last = 1;
+    do {
+      const page = await this.pendingReport({ page: current, per_page: 100 } as PageDto, principal);
+      items.push(...page.items); last = page.meta.last_page; current += 1;
+    } while (current <= last);
+    return items;
   }
 }

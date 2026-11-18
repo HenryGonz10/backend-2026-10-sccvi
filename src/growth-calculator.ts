@@ -36,7 +36,9 @@ export function correctedLengthCm(tallaCm: number, ageDays: number, type: 'LONGI
 
 export function evaluateGrowth(indicator: GrowthIndicator, value: number, lms: Lms): GrowthResult {
   const z = lmsZ(value, lms);
-  const range = indicator === 'LONGITUD_TALLA_EDAD' ? [-6, 6] : [-5, 5];
+  // WHO Anthro plausibility limits: WAZ [-6,+5], HAZ [-6,+6],
+  // and WHZ/BAZ [-5,+5].  The bounds are inclusive.
+  const range = indicator === 'PESO_EDAD' ? [-6, 5] : indicator === 'LONGITUD_TALLA_EDAD' ? [-6, 6] : [-5, 5];
   if (!Number.isFinite(z) || z < range[0] || z > range[1]) return { z, percentile: null, classification: 'NO_EVALUABLE', state: 'IMPLAUSIBLE', detail: `Valor fuera del rango de plausibilidad OMS para ${indicator}.` };
   const classification = z < P5_Z ? 'BAJO_P5' : z > P95_Z ? 'ALTO_P95' : 'ADECUADO';
   // OMS no publica percentiles por encima de |Z| 3; preserve that limit instead of inventing precision.

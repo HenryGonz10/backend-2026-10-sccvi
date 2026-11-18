@@ -18,6 +18,15 @@ describe('SCCVI read projections', () => {
     expect(minors.find).toHaveBeenNthCalledWith(2, expect.objectContaining({ skip: 2, take: 2 }));
   });
 
+  it('honors the SSO resolver maximum of 100 BIGINT identities per request', async () => {
+    const minors = repo(); const sso = { resolvePeople: jest.fn().mockResolvedValue([]) }; const tokens = { get: jest.fn().mockResolvedValue('technical-token') };
+    const service = new SccviReadProjectionService({ get: jest.fn() } as never, minors as never, repo() as never, repo() as never, repo() as never, repo() as never, repo() as never, repo() as never, sso as never, tokens as never);
+    await expect((service as any).projectionPeople(Array.from({ length: 250 }, (_, index) => String(index + 1)))).resolves.toEqual([]);
+    expect(sso.resolvePeople).toHaveBeenCalledTimes(3);
+    expect(sso.resolvePeople.mock.calls.map(call => call[0].length)).toEqual([100, 100, 50]);
+    expect(tokens.get).toHaveBeenCalledTimes(1);
+  });
+
   it('paginates token search in Elasticsearch and preserves ranked order from Mongo', async () => {
     const { service } = build(); const collection = { find: jest.fn().mockReturnValue({ toArray: jest.fn().mockResolvedValue([{ _id: '8' }, { _id: '7' }]) }) };
     (service as any).collection = collection; (service as any).elastic = { search: jest.fn().mockResolvedValue({ hits: { hits: [{ _id: '7' }, { _id: '8' }], total: { value: 5 } } }) };

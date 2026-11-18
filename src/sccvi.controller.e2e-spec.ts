@@ -34,6 +34,7 @@ describe('SCCVI HTTP contract', () => {
   const readProjection = { list: jest.fn(), search: jest.fn(), rebuild: jest.fn() };
   const reportExports = { build: jest.fn() };
   beforeAll(async () => {
+    process.env.PUBLIC_CARD_RATE_LIMIT_REDIS_URL = 'redis://127.0.0.1:6380/15';
     const module = await Test.createTestingModule({ controllers: [SccviController], providers: [{ provide: SccviService, useValue: service }, { provide: SccviReadProjectionService, useValue: readProjection }, { provide: ReportExportService, useValue: reportExports }, { provide: APP_GUARD, useClass: HeaderPrincipalGuard }] }).compile();
     app = module.createNestApplication(); app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true, exceptionFactory: errors => new UnprocessableEntityException(errors) })); app.useGlobalInterceptors(new ApiResponseInterceptor()); app.useGlobalFilters(new ApiExceptionFilter()); await app.init(); app.getHttpServer().setMaxListeners(50);
   });

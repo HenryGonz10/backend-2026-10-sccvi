@@ -35,4 +35,16 @@ describe('GrowthService', () => {
     await expect(service.weightForAgeCurves({ sexo: 'MASCULINO' })).resolves.toMatchObject({ estado: 'EVALUABLE', indicador: 'PESO_EDAD', sexo_curva: 'MASCULINO', puntos: [expect.objectContaining({ edad_dias: 0, p3: expect.any(Number), p5: expect.any(Number), p50: 3.346, p85: expect.any(Number), p95: expect.any(Number), p97: expect.any(Number) })] });
     expect(parameters.find).toHaveBeenCalledWith(expect.objectContaining({ where: { estandar_id: '1', indicador: 'PESO_EDAD', sexo_curva: 'MASCULINO' } }));
   });
+  it('returns both required OMS charts from the same versioned standard', async () => {
+    const standards = repo(); const parameters = repo(); const service = new GrowthService(standards as any, parameters as any, repo() as any, repo() as any, repo() as any, repo() as any, {} as any);
+    standards.findOne.mockResolvedValue({ id: '1', codigo: 'WHO-CGS-2006-0-5', version_fuente: 'WHO 2006', sha256_datos: 'a'.repeat(64) });
+    parameters.find.mockResolvedValue([{ x: '0', l: '.3487', m: '3.3464', s: '.14602' }]);
+    await expect(service.curves({ sexo: 'FEMENINO' })).resolves.toMatchObject({
+      estado: 'EVALUABLE', sexo_curva: 'FEMENINO',
+      curvas: [
+        { indicador: 'PESO_EDAD', puntos: [expect.objectContaining({ p3: expect.any(Number), p97: expect.any(Number) })] },
+        { indicador: 'LONGITUD_TALLA_EDAD', puntos: [expect.objectContaining({ p3: expect.any(Number), p97: expect.any(Number) })] },
+      ],
+    });
+  });
 });

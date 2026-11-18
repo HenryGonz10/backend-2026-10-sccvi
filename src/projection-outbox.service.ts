@@ -19,8 +19,13 @@ export class ProjectionOutboxService implements OnModuleInit, OnModuleDestroy {
   private timer?: NodeJS.Timeout;
   private connecting?: Promise<void>;
   private pumping = false;
+  private pendingDeliveries: amqp.ConsumeMessage[] = [];
+  private flushTimer?: NodeJS.Timeout;
+  private flushing = false;
   private readonly exchange = 'sccvi.projections';
   private readonly queue = 'sccvi.projections.v1';
+  /** A transient SSO/Geo outage must not turn Rabbit redelivery into a retry storm. */
+  private readonly retryDelayMs = Math.max(1_000, Number(process.env.PROJECTION_RETRY_DELAY_MS ?? 60_000));
 
   constructor(
     @InjectRepository(OutboxProyeccion) private readonly outbox: Repository<OutboxProyeccion>,
@@ -29,7 +34,7 @@ export class ProjectionOutboxService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit() { this.timer = setInterval(() => void this.pump(), 1000); void this.pump(); }
-  async onModuleDestroy() { if (this.timer) clearInterval(this.timer); await this.connection?.close().catch(() => undefined); }
+  async onModuleDestroy() { if (this.timer) clearInterval(this.timer); if (this.flushTimer) clearTimeout(this.flushTimer); await this.connection?.close().catch(() => undefined); }
 
   async enqueue(minorId: string): Promise<void> {
     const key = `minor:${minorId}:refresh`;
@@ -52,7 +57,9 @@ export class ProjectionOutboxService implements OnModuleInit, OnModuleDestroy {
       await channel.assertExchange(this.exchange, 'topic', { durable: true });
       await channel.assertQueue(this.queue, { durable: true });
       await channel.bindQueue(this.queue, this.exchange, 'minor.changed');
-      await channel.prefetch(10);
+      // Coalesce fan-out before resolving people in SSO. A batch remains under
+      // the resolver's 100-id contract and avoids a durable queue rate storm.
+      await channel.prefetch(50);
       await channel.consume(this.queue, message => void this.consume(message), { noAck: false });
       this.connection = connection; this.channel = channel;
     })();
@@ -61,14 +68,34 @@ export class ProjectionOutboxService implements OnModuleInit, OnModuleDestroy {
 
   private async consume(message: amqp.ConsumeMessage | null): Promise<void> {
     if (!message || !this.channel) return;
+    this.pendingDeliveries.push(message);
+    if (!this.flushTimer) this.flushTimer = setTimeout(() => void this.flush(), 25);
+  }
+
+  private async flush(): Promise<void> {
+    this.flushTimer = undefined;
+    if (this.flushing || !this.channel) return;
+    this.flushing = true;
+    const deliveries = this.pendingDeliveries.splice(0, 100);
     try {
-      const event = JSON.parse(message.content.toString()) as { minor_id?: string };
-      if (!event.minor_id || !/^\d+$/.test(event.minor_id)) throw new Error('Invalid projection event.');
-      await this.readProjection.project(event.minor_id);
-      this.channel.ack(message);
+      const minorIds = deliveries.map(message => {
+        const event = JSON.parse(message.content.toString()) as { minor_id?: string };
+        if (!event.minor_id || !/^\d+$/.test(event.minor_id)) throw new Error('Invalid projection event.');
+        return event.minor_id;
+      });
+      await this.readProjection.projectMany([...new Set(minorIds)]);
+      deliveries.forEach(message => this.channel?.ack(message));
     } catch (error) {
       this.logger.warn(`Projection event will be retried: ${error instanceof Error ? error.message : 'unknown error'}`);
-      this.channel.nack(message, false, true);
+      const channel = this.channel;
+      setTimeout(() => {
+        // The channel may have been recreated while the delivery waited. In
+        // that case Rabbit will restore the unacknowledged message itself.
+        if (channel === this.channel) deliveries.forEach(message => channel.nack(message, false, true));
+      }, this.retryDelayMs);
+    } finally {
+      this.flushing = false;
+      if (this.pendingDeliveries.length && !this.flushTimer) this.flushTimer = setTimeout(() => void this.flush(), 25);
     }
   }
 

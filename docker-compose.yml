@@ -21,6 +21,7 @@ services:
       MONGO_DATABASE: sccvi-read
       ELASTICSEARCH_NODE: http://elasticsearch:9200
       RABBITMQ_URL: ${RABBITMQ_URL:-amqp://admin:${RABBITMQ_ADMIN_PASSWORD}@rabbitmq:5672/%2Fdevelopment}
+      PUBLIC_CARD_RATE_LIMIT_REDIS_URL: ${PUBLIC_CARD_RATE_LIMIT_REDIS_URL:-redis://redis:6379/3}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5174}
       PUBLIC_CARD_TTL_DAYS: ${PUBLIC_CARD_TTL_DAYS:-365}
     ports: ['8200:8200']

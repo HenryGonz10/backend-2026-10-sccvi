@@ -31,7 +31,7 @@ export class SsoServiceTokenService {
     const base = this.config.get<string>('SSO_BASE_URL');
     if (!base) throw new ServiceUnavailableException('SSO_BASE_URL no está configurado.');
     const url = new URL(base);
-    const response = await fetch(`${url.origin}/api/login`, {
+    const response = await fetch(`${url.origin}/api/v1/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', System: this.config.get<string>('SSO_SYSTEM_TAG', 'sccvi') },
       body: JSON.stringify({ email: username, password }),

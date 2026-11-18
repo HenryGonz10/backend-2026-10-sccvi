@@ -7,6 +7,9 @@ import { ApiResponseInterceptor } from './http/api-response.interceptor';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  const trustedProxies = (process.env.TRUSTED_PROXY_CIDRS ?? '').split(',').map(value => value.trim()).filter(Boolean);
+  // Do not accept arbitrary X-Forwarded-For values on direct requests.
+  (app.getHttpAdapter().getInstance() as { set: (key: string, value: string[] | boolean) => void }).set('trust proxy', trustedProxies.length ? trustedProxies : false);
   app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true, exceptionFactory: errors => new UnprocessableEntityException(errors) }));
   app.useGlobalInterceptors(new ApiResponseInterceptor());
   app.useGlobalFilters(new ApiExceptionFilter());

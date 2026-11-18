@@ -10,8 +10,9 @@ type Row = Record<string, string | number | null>;
 export class ReportExportService {
   constructor(private readonly sccvi: SccviService) {}
   private async report(principal: SccviPrincipal) {
-    const [coverage, territory, growth, pending, scope, standard] = await Promise.all([this.sccvi.coverage(principal), this.sccvi.applicationAnalytics(principal), this.sccvi.growthReport(principal), this.sccvi.pendingReport({ page: 1, per_page: 100 }, principal), this.sccvi.territoryFor(principal), this.sccvi.growthReportMetadata()]);
-    return { coverage, territory, growth, pending, scope, standard, generated_at: new Date().toISOString(), generated_by_persona_id: principal.personaId ?? null };
+    const pending = typeof this.sccvi.pendingReportAll === 'function' ? this.sccvi.pendingReportAll(principal) : this.sccvi.pendingReport({ page: 1, per_page: 100 }, principal).then(page => page.items);
+    const [coverage, territory, growth, pendingItems, scope, standard] = await Promise.all([this.sccvi.coverage(principal), this.sccvi.applicationAnalytics(principal), this.sccvi.growthReport(principal), pending, this.sccvi.territoryFor(principal), this.sccvi.growthReportMetadata()]);
+    return { coverage, territory, growth, pending: pendingItems, scope, standard, generated_at: new Date().toISOString(), generated_by_persona_id: principal.personaId ?? null };
   }
   private sheets(value: Awaited<ReturnType<ReportExportService['report']>>) {
     const summary: Row[] = [
@@ -20,7 +21,7 @@ export class ReportExportService {
     ];
     const territories = value.territory.puntos.map(item => ({ departamento_codigo: item.departamento_codigo, municipio_codigo: item.municipio_codigo, aplicaciones: item.aplicaciones }));
     const vaccines = value.territory.vacunas.map(item => ({ codigo: item.codigo, vacuna: item.nombre, aplicaciones: item.aplicaciones }));
-    const alerts = [...value.pending.items.map((item: { tipo: string; estado: string; fecha_programada: string; menor_id: string }) => ({ categoria: 'VACUNACION', tipo: item.tipo, estado: item.estado, fecha: item.fecha_programada, menor_id: item.menor_id })), ...value.growth.alertas.map((item: { tipo: string; estado: string; created_at: Date; menor_id: string }) => ({ categoria: 'CRECIMIENTO', tipo: item.tipo, estado: item.estado, fecha: item.created_at.toISOString(), menor_id: item.menor_id }))];
+    const alerts = [...value.pending.map((item: { tipo: string; estado: string; fecha_programada: string; menor_id: string }) => ({ categoria: 'VACUNACION', tipo: item.tipo, estado: item.estado, fecha: item.fecha_programada, menor_id: item.menor_id })), ...value.growth.alertas.map((item: { tipo: string; estado: string; created_at: Date; menor_id: string }) => ({ categoria: 'CRECIMIENTO', tipo: item.tipo, estado: item.estado, fecha: item.created_at.toISOString(), menor_id: item.menor_id }))];
     const averages = Object.entries(value.growth.promedio_z_por_indicador).map(([indicador, promedio_z]) => ({ indicador, promedio_z }));
     const metadata: Row[] = [
       { campo: 'generado_en', valor: value.generated_at }, { campo: 'generado_por_persona_id', valor: value.generated_by_persona_id },
@@ -42,7 +43,7 @@ export class ReportExportService {
     for (const [name, rows] of Object.entries(sheets)) {
       const sheet = book.addWorksheet(name.slice(0, 31)); const keys = [...new Set(rows.flatMap(row => Object.keys(row)))];
       sheet.columns = keys.map(key => ({ header: key.replaceAll('_', ' '), key, width: Math.max(14, key.length + 4) }));
-      rows.forEach(row => sheet.addRow(Object.fromEntries(Object.entries(row).map(([key, value]) => [key, this.safeCell(value)]))));
+      rows.forEach(row => sheet.addRow(Object.fromEntries(Object.entries(row).map(([key, value]) => [key, this.safeCell(value as string | number | null)]))));
       sheet.getRow(1).font = { bold: true }; sheet.views = [{ state: 'frozen', ySplit: 1 }]; sheet.autoFilter = { from: 'A1', to: `${String.fromCharCode(64 + Math.max(keys.length, 1))}1` };
     }
     return Buffer.from(await book.xlsx.writeBuffer());
@@ -51,7 +52,7 @@ export class ReportExportService {
     return new Promise<Buffer>((resolve, reject) => {
       const pdf = new PDFDocument({ size: 'A4', margin: 44 }); const chunks: Buffer[] = []; pdf.on('data', chunk => chunks.push(Buffer.from(chunk))); pdf.on('error', reject); pdf.on('end', () => resolve(Buffer.concat(chunks)));
       pdf.fontSize(18).text('SCCVI — Reporte operativo'); pdf.moveDown(.3); pdf.fontSize(9).fillColor('#444').text(`Generado: ${generatedAt}. Alcance: territorio autorizado del solicitante.`); pdf.fillColor('#000').moveDown();
-      for (const [name, rows] of Object.entries(sheets)) { pdf.fontSize(13).text(name.toUpperCase()); pdf.moveDown(.2); if (!rows.length) pdf.fontSize(9).text('Sin datos.'); else { const keys = Object.keys(rows[0]); pdf.fontSize(8); rows.slice(0, 60).forEach(row => pdf.text(keys.map(key => `${key.replaceAll('_', ' ')}: ${row[key] ?? '—'}`).join('  |  '))); if (rows.length > 60) pdf.text(`… ${rows.length - 60} filas adicionales disponibles en XLSX.`); } pdf.moveDown(); }
+      for (const [name, rows] of Object.entries(sheets)) { pdf.fontSize(13).text(name.toUpperCase()); pdf.moveDown(.2); if (!rows.length) pdf.fontSize(9).text('Sin datos.'); else { const keys = Object.keys(rows[0]); pdf.fontSize(8); for (const row of rows) { if (pdf.y > 760) pdf.addPage(); pdf.text(keys.map(key => `${key.replaceAll('_', ' ')}: ${(row as Row)[key] ?? '—'}`).join('  |  ')); } } pdf.moveDown(); }
       pdf.fontSize(8).fillColor('#444').text('Datos clínicos para uso autorizado. El catálogo de vacunación DEMO no constituye recomendación clínica.'); pdf.end();
     });
   }
