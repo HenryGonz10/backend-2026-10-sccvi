@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import dataSource from '../data-source';
-import { EstandarCrecimiento, ParametroCrecimiento } from '../entities';
+import { EstandarCrecimiento, ParametroCrecimiento } from '../shared/persistence/entities';
 
 type Dataset = { standard: { code: string; name: string; version: string; source_url: string; age_min_days: number; age_max_days: number }; parameters: Array<[string, string, number, number, number, number]> };
 const EXPECTED_PARAMETERS = 13_546;

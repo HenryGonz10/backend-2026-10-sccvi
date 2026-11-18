@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as amqp from 'amqplib';
 import { Repository } from 'typeorm';
-import { OutboxProyeccion } from './entities';
+import { OutboxProyeccion } from '../../shared/persistence/entities';
 import { SccviReadProjectionService } from './read-projection.service';
 
 /**

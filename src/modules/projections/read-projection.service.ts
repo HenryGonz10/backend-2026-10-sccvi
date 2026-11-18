@@ -4,9 +4,9 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Client } from '@elastic/elasticsearch';
 import { Collection, MongoClient } from 'mongodb';
 import { In, Repository } from 'typeorm';
-import { AlertaVacunacion, EsquemaDosis, MedicionAntropometrica, Menor, MenorResponsable, RegistroVacunacion, Vacuna } from './entities';
-import { SsoClient, type SsoPerson } from './integrations';
-import { SsoServiceTokenService } from './sso-service-token.service';
+import { AlertaVacunacion, EsquemaDosis, MedicionAntropometrica, Menor, MenorResponsable, RegistroVacunacion, Vacuna } from '../../shared/persistence/entities';
+import { SsoClient, type SsoPerson } from '../integrations/integrations';
+import { SsoServiceTokenService } from '../../shared/auth/sso-service-token.service';
 
 export type MinorReadDocument = {
   _id: string; minor_id: string; persona_id: string;

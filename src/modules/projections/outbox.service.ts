@@ -2,9 +2,9 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, Repository } from 'typeorm';
-import { OutboxNotificacion } from './entities';
-import { NotificationsClient } from './integrations';
-import { SsoServiceTokenService } from './sso-service-token.service';
+import { OutboxNotificacion } from '../../shared/persistence/entities';
+import { NotificationsClient } from '../integrations/integrations';
+import { SsoServiceTokenService } from '../../shared/auth/sso-service-token.service';
 
 @Injectable()
 export class OutboxService implements OnModuleInit, OnModuleDestroy {

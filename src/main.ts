@@ -2,8 +2,8 @@ import { UnprocessableEntityException, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
-import { ApiExceptionFilter } from './http/api-exception.filter';
-import { ApiResponseInterceptor } from './http/api-response.interceptor';
+import { ApiExceptionFilter } from './shared/http/api-exception.filter';
+import { ApiResponseInterceptor } from './shared/http/api-response.interceptor';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);

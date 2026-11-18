@@ -4,15 +4,15 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomBytes, randomInt } from 'node:crypto';
 import * as argon2 from 'argon2';
 import { DataSource, EntityManager, In, ObjectLiteral, Repository } from 'typeorm';
-import { AlertaVacunacion, AuditoriaSccvi, CarnePublico, EsquemaDosis, EsquemaVacunacion, JornadaVacunacion, JornadaVacuna, MedicionAntropometrica, Menor, MenorResponsable, RegistroVacunacion, Vacuna } from './entities';
-import { AplicacionDto, ContactoRegistroDto, CorreccionMedicionDto, DosisDto, EsquemaDto, FamiliaRegistroDto, FamiliaResponsableDto, JornadaDto, JornadaNotificacionDto, MedicionDto, MenorDto, MenorQueryDto, PageDto, PersonaSearchDto, ResponsableDto, UpdateEsquemaDto, UpdateJornadaDto, UpdateMenorDto, UpdateResponsableDto, UpdateVacunaDto, VacunaDto } from './dto';
-import { GeoClient, SsoClient, type SsoCredential } from './integrations';
-import { OutboxService } from './outbox.service';
-import { SccviReadProjectionService } from './read-projection.service';
-import { ProjectionOutboxService } from './projection-outbox.service';
-import { SsoServiceTokenService } from './sso-service-token.service';
-import { SccviPrincipal } from './sso-jwt.guard';
-import { GrowthService } from './growth.service';
+import { AlertaVacunacion, AuditoriaSccvi, CarnePublico, EsquemaDosis, EsquemaVacunacion, JornadaVacunacion, JornadaVacuna, MedicionAntropometrica, Menor, MenorResponsable, RegistroVacunacion, Vacuna } from '../../shared/persistence/entities';
+import { AplicacionDto, ContactoRegistroDto, CorreccionMedicionDto, DosisDto, EsquemaDto, FamiliaRegistroDto, FamiliaResponsableDto, JornadaDto, JornadaNotificacionDto, MedicionDto, MenorDto, MenorQueryDto, PageDto, PersonaSearchDto, ResponsableDto, UpdateEsquemaDto, UpdateJornadaDto, UpdateMenorDto, UpdateResponsableDto, UpdateVacunaDto, VacunaDto } from '../../shared/persistence/dto';
+import { GeoClient, SsoClient, type SsoCredential } from '../integrations/integrations';
+import { OutboxService } from '../projections/outbox.service';
+import { SccviReadProjectionService } from '../projections/read-projection.service';
+import { ProjectionOutboxService } from '../projections/projection-outbox.service';
+import { SsoServiceTokenService } from '../../shared/auth/sso-service-token.service';
+import { SccviPrincipal } from '../../shared/auth/sso-jwt.guard';
+import { GrowthService } from '../growth/growth.service';
 
 type Page<T> = { items: T[]; meta: { current_page: number; per_page: number; total: number; last_page: number } };
 

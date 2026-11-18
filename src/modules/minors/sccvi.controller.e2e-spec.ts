@@ -3,13 +3,21 @@ import { APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import * as request from 'supertest';
-import { ApiExceptionFilter } from './http/api-exception.filter';
-import { ApiResponseInterceptor } from './http/api-response.interceptor';
-import { SccviController } from './sccvi.controller';
+import { ApiExceptionFilter } from '../../shared/http/api-exception.filter';
+import { ApiResponseInterceptor } from '../../shared/http/api-response.interceptor';
+import { IS_PUBLIC } from '../../shared/auth/public.decorator';
+import { AlertsController } from '../alerts/alerts.controller';
+import { CampaignsController } from '../campaigns/campaigns.controller';
+import { GrowthController } from '../growth/growth.controller';
+import { ProjectionsController } from '../projections/projections.controller';
+import { SccviReadProjectionService } from '../projections/read-projection.service';
+import { PublicCardController } from '../public-card/public-card.controller';
+import { PublicCardRateLimitGuard } from '../public-card/public-card-rate-limit.guard';
+import { ReportExportService } from '../reports/report-export.service';
+import { ReportsController } from '../reports/reports.controller';
+import { VaccinationController } from '../vaccination/vaccination.controller';
+import { MinorsController } from './minors.controller';
 import { SccviService } from './sccvi.service';
-import { SccviReadProjectionService } from './read-projection.service';
-import { ReportExportService } from './report-export.service';
-import { IS_PUBLIC } from './public.decorator';
 
 @Injectable()
 class HeaderPrincipalGuard implements CanActivate {
@@ -35,7 +43,16 @@ describe('SCCVI HTTP contract', () => {
   const reportExports = { build: jest.fn() };
   beforeAll(async () => {
     process.env.PUBLIC_CARD_RATE_LIMIT_REDIS_URL = 'redis://127.0.0.1:6380/15';
-    const module = await Test.createTestingModule({ controllers: [SccviController], providers: [{ provide: SccviService, useValue: service }, { provide: SccviReadProjectionService, useValue: readProjection }, { provide: ReportExportService, useValue: reportExports }, { provide: APP_GUARD, useClass: HeaderPrincipalGuard }] }).compile();
+    const module = await Test.createTestingModule({
+      controllers: [MinorsController, VaccinationController, PublicCardController, GrowthController, CampaignsController, AlertsController, ReportsController, ProjectionsController],
+      providers: [
+        { provide: SccviService, useValue: service },
+        { provide: SccviReadProjectionService, useValue: readProjection },
+        { provide: ReportExportService, useValue: reportExports },
+        PublicCardRateLimitGuard,
+        { provide: APP_GUARD, useClass: HeaderPrincipalGuard },
+      ],
+    }).compile();
     app = module.createNestApplication(); app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true, exceptionFactory: errors => new UnprocessableEntityException(errors) })); app.useGlobalInterceptors(new ApiResponseInterceptor()); app.useGlobalFilters(new ApiExceptionFilter()); await app.init(); app.getHttpServer().setMaxListeners(50);
   });
   afterAll(async () => app.close());

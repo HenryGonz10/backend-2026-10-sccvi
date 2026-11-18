@@ -1,5 +1,5 @@
 import dataSource from '../data-source';
-import { EsquemaDosis, EsquemaVacunacion, MedicionAntropometrica, Menor, MenorResponsable, RegistroVacunacion, Vacuna } from '../entities';
+import { EsquemaDosis, EsquemaVacunacion, MedicionAntropometrica, Menor, MenorResponsable, RegistroVacunacion, Vacuna } from '../shared/persistence/entities';
 
 type Vaccine = readonly [code: string, name: string];
 type Dose = readonly [code: string, order: number, minDays: number, maxDays: number | null, intervalDays: number | null, recurrenceDays?: number | null];

@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { SccviService } from './sccvi.service';
+import { SccviService } from '../minors/sccvi.service';
 
 /** Runs at 16:00 America/Guatemala (UTC-6, without daylight saving time). */
 @Injectable()

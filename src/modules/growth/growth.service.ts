@@ -1,9 +1,9 @@
 import { Injectable, ServiceUnavailableException, UnprocessableEntityException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, In, Repository } from 'typeorm';
-import { AlertaClinica, EstandarCrecimiento, EvaluacionCrecimiento, MedicionAntropometrica, MenorResponsable, ParametroCrecimiento } from './entities';
+import { AlertaClinica, EstandarCrecimiento, EvaluacionCrecimiento, MedicionAntropometrica, MenorResponsable, ParametroCrecimiento } from '../../shared/persistence/entities';
 import { correctedLengthCm, evaluateGrowth, GrowthCurveSex, GrowthIndicator, interpolatedLms } from './growth-calculator';
-import { OutboxService } from './outbox.service';
+import { OutboxService } from '../projections/outbox.service';
 
 type PersonClinicalIdentity = { fecha_nacimiento?: string; sexo?: string };
 type Principal = { personaId?: string | null };

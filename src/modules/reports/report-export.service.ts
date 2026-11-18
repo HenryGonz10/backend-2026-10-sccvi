@@ -1,8 +1,8 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import * as ExcelJS from 'exceljs';
 import * as PDFDocument from 'pdfkit';
-import { SccviPrincipal } from './sso-jwt.guard';
-import { SccviService } from './sccvi.service';
+import { SccviPrincipal } from '../../shared/auth/sso-jwt.guard';
+import { SccviService } from '../minors/sccvi.service';
 
 type Row = Record<string, string | number | null>;
 
